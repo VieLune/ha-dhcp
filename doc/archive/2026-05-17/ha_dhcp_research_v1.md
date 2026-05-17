@@ -14,8 +14,8 @@
 
 ### 1.1 业务背景
 
-当前系统为 AC 产品。AC 下管理多个 AP，AP 下管理多个 CMS，AP 和 CMS 都需要 IP 地址，由 AC 内置 DHCP 服务完成地址分配。
-系统部署在封闭医疗内网中，医院原有设备 IP 基本固定，接入本医疗设备系统后，只需要设置 AC 的 IP、IP 池与预留 IP。
+当前系统为 AC 产品。AC 下管理多个 AP 与业务终端，这些设备都需要 IP 地址，由 AC 内置 DHCP 服务完成地址分配。
+系统部署在封闭业务内网中，客户现场原有设备 IP 基本固定，接入本业务系统后，只需要设置 AC 的 IP、IP 池与预留 IP。
 
 ### 1.2 高可用目标
 
@@ -41,8 +41,8 @@
 
 ### 2.1 网络与部署约束
 
-- 两台 AC、AP、CMS 都在同一个二层网段。
-- AP/CMS 的 DHCP 广播能被两台 AC 同时收到。
+- 两台 AC、AP、业务终端都在同一个二层网段。
+- AP/业务终端的 DHCP 广播能被两台 AC 同时收到。
 - 没有额外交换机、路由器或独立网关服务器可用于部署 Nginx。
 - OpenResty 只能部署在两台 AC 本机。
 - AC 部署服务器性能一般，方案不能过重。
@@ -60,7 +60,7 @@
 ### 2.3 风险约束
 
 - 两节点无第三方仲裁，无法在所有网络分区场景下同时保证强一致与高可用。
-- 医疗内网场景下应优先保证不重复分配 IP。
+- 封闭业务内网场景下应优先保证不重复分配 IP。
 - 当角色未知、VIP 未绑定本机、Hazelcast 不可用或租约视图不可信时，应拒绝新分配。
 
 ## 3. 方案对比与决策
@@ -93,7 +93,7 @@
 
 ```mermaid
 flowchart LR
-  DEV["AP / CMS<br/>DHCP + HTTP/API"] --> VIP["VIP"]
+  DEV["AP / 业务终端<br/>DHCP + HTTP/API"] --> VIP["VIP"]
 
   VIP --> OR1["AC-1 OpenResty"]
   VIP --> OR2["AC-2 OpenResty"]
@@ -182,7 +182,7 @@ DHCP Option 54 / Server Identifier 应为 VIP。如果当前配置文件里的 D
 
 ```mermaid
 sequenceDiagram
-  participant C as AP/CMS
+  participant C as AP/业务终端
   participant D as DHCP模块
   participant HA as HA角色服务
   participant L as 租约服务
@@ -250,7 +250,7 @@ sequenceDiagram
 |---|---|---|
 | 正常启动 | 启动两台 AC | 只有一台持有 VIP，只有 MASTER 响应 DHCP。 |
 | HTTP/API 入口 | 访问 VIP 管理端 | OpenResty 代理到当前 MASTER 本机 Spring Boot。 |
-| DHCP 抓包 | AP/CMS 发起 DHCP 申请 | 只看到一个 DHCPOFFER / DHCPACK。 |
+| DHCP 抓包 | AP/业务终端发起 DHCP 申请 | 只看到一个 DHCPOFFER / DHCPACK。 |
 | Option 54 校验 | 抓包查看 DHCP Server Identifier | Option 54 为 VIP。 |
 | MASTER 应用宕机 | 停止 MASTER Spring Boot | VIP 漂移，BACKUP 接管。 |
 | MASTER 主机故障 | 断开 MASTER 网络或关机 | BACKUP 接管，已分配 IP 不被重复分配。 |

@@ -51,7 +51,7 @@ AC-2 + AC-3：允许 AC-2 所在侧服务
 AC-1 单独：禁止 AC-1 分配新 IP
 ```
 
-这符合当前医疗内网场景的优先级：宁可短时间不能分配新 IP，也不能重复分配 IP。
+这符合当前封闭业务内网场景的优先级：宁可短时间不能分配新 IP，也不能重复分配 IP。
 
 ## 3. 标准方案参考
 
@@ -74,7 +74,7 @@ AC-1 单独：禁止 AC-1 分配新 IP
 
 ```mermaid
 flowchart LR
-  DEV["AP / CMS / DHCP Client"] --- LAN["二层业务网络"]
+  DEV["AP / 业务终端 / DHCP Client"] --- LAN["二层业务网络"]
 
   AC1["AC-1<br/>Spring Boot + DHCP<br/>OpenResty + Keepalived<br/>Hazelcast member"] --- LAN
   AC2["AC-2<br/>Spring Boot + DHCP<br/>OpenResty + Keepalived<br/>Hazelcast member"] --- LAN
@@ -303,7 +303,7 @@ dhcp-majority
   DHCP 租约过期回收
   设备发现广播
   主动控制类广播/多播
-  对 AP/CMS 的状态写入和指令下发
+  对 AP/业务终端的状态写入和指令下发
 
 STANDBY 可执行：
   接收租约同步

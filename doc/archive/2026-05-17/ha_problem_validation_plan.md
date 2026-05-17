@@ -20,7 +20,7 @@
 
 ```mermaid
 flowchart LR
-  AP["AP / CMS / DHCP测试客户端"] --- SW["同一二层网络"]
+  AP["AP / 业务终端 / DHCP测试客户端"] --- SW["同一二层网络"]
   AC1["AC-1<br/>物理IP: A1<br/>Keepalived + OpenResty + Spring Boot"] --- SW
   AC2["AC-2<br/>物理IP: A2<br/>Keepalived + OpenResty + Spring Boot"] --- SW
   VIP["VIP: AVIP"] --- SW
@@ -29,7 +29,7 @@ flowchart LR
 
 ### 2.2 前置条件
 
-- AC-1、AC-2、AP/CMS、抓包 PC 在同一二层网段。
+- AC-1、AC-2、AP/业务终端、抓包 PC 在同一二层网段。
 - AC-1、AC-2 都按当前项目正常部署 Spring Boot。
 - Keepalived 按正常主备方式配置 VIP。
 - OpenResty 部署在两台 AC 本机，HTTP/API 通过 VIP 访问。
@@ -139,7 +139,7 @@ sequenceDiagram
 
 1. 两台 Spring Boot 都启动。
 2. 不手工停用 BACKUP 的 DHCP。
-3. AP/CMS 或测试客户端发起 DHCP 申请。
+3. AP/业务终端或测试客户端发起 DHCP 申请。
 4. 在抓包 PC 上过滤 DHCP 包。
 
 Wireshark 过滤：
@@ -308,7 +308,7 @@ tcpdump -i <网卡> -nn -vvv -s 0 -w broadcast-ha.pcap 'broadcast'
 
 - 同一周期是否有 AC-1、AC-2 各发一份相同广播。
 - 广播源 IP 是物理 IP 还是 VIP。
-- AP/CMS 是否收到两个 AC 的发现/心跳/控制消息。
+- AP/业务终端是否收到两个 AC 的发现/心跳/控制消息。
 
 判定：
 
@@ -323,7 +323,7 @@ tcpdump -i <网卡> -nn -vvv -s 0 -w broadcast-ha.pcap 'broadcast'
 
 操作：
 
-1. 使用 AP/CMS 或测试工具发送一条广播请求。
+1. 使用 AP/业务终端或测试工具发送一条广播请求。
 2. 查看两台 AC 日志和数据库。
 
 判定：
@@ -399,7 +399,7 @@ tcpdump -i <网卡> -nn -vvv -s 0 -w multicast-ha.pcap 'multicast'
 
 - 同一业务周期是否由 AC-1、AC-2 同时发多播。
 - 多播源 IP 是物理 IP 还是 VIP。
-- AP/CMS 是否收到重复消息。
+- AP/业务终端是否收到重复消息。
 
 判定：
 
@@ -414,7 +414,7 @@ tcpdump -i <网卡> -nn -vvv -s 0 -w multicast-ha.pcap 'multicast'
 
 操作：
 
-1. 让 AP/CMS 或测试工具发送一条多播业务消息。
+1. 让 AP/业务终端或测试工具发送一条多播业务消息。
 2. 查看两台 AC 日志、状态和数据库。
 
 判定：
