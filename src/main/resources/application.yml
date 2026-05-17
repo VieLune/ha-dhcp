@@ -1,0 +1,55 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: ha-dhcp
+  datasource:
+    url: jdbc:h2:file:./data/ha-dhcp;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+  flyway:
+    enabled: true
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: always
+
+dhcp:
+  enabled: true
+  bind-address: 0.0.0.0
+  port: 1067
+  client-port: 1068
+  interface-name:
+  server-identifier: 127.0.0.1
+  subnet-mask: 255.255.255.0
+  router: 192.168.56.1
+  dns-servers:
+    - 192.168.56.1
+  lease-seconds: 3600
+  excluded-addresses: []
+  reservations: {}
+  pool:
+    start: 192.168.56.100
+    end: 192.168.56.200
+
+ha:
+  vip: 127.0.0.1
+  interface-name:
+  require-majority: false
+  minimum-cluster-size: 2
+
+cluster:
+  name: ha-dhcp
+  port: 5701
+  members: []
