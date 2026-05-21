@@ -2,7 +2,12 @@
 
 **项目**：ha-dhcp  
 **日期**：2026-05-21  
-**范围**：仅 2 台 AC 节点（无 CMS），Spring Boot 3.3.6 + Hazelcast 5.5.0 AP + Keepalived  
+**范围**：2 台 AC + n 台 CMS，共 n+2 台设备。Spring Boot 3.3.6 + Hazelcast 5.5.0 AP + Keepalived。
+**拓扑说明**：
+- 共置模式（n=0）：2 台设备，每台运行 AC+CMS，Hazelcast 集群共 4 个成员（2 AC + 2 CMS）。
+- 分离模式（n≥1）：n+2 台设备，CMS 独立部署，Hazelcast 集群共 n+2 个成员。
+- CMS 进程自动加入 Hazelcast 集群。
+- AC 的主备切换始终只涉及 2 台 AC 设备。  
 **状态**：研究 / 设计阶段
 
 ---
@@ -140,6 +145,59 @@ cluster:
 
 ---
 
+## 2.4 部署拓扑与脑裂风险分析
+
+### 2.4.1 共置模式（n=0）：AC 与 CMS 部署在同一设备
+
+```
+设备-1: AC进程 + CMS进程  → Hazelcast 看到 2 个成员
+设备-2: AC进程 + CMS进程  → Hazelcast 看到 2 个成员
+总计: 4 个 Hazelcast 成员
+```
+
+**网络分区场景（设备-1 与 设备-2 之间链路断开）**：
+- 设备-1 上的 AC 和 CMS 仍然互通（同一设备）→ 设备-1 看到 2 个存活成员
+- 设备-2 上的 AC 和 CMS 仍然互通（同一设备）→ 设备-2 看到 2 个存活成员
+- 两边都满足 `minimumClusterSize=2` → 两边都认为集群可用
+- **结果：脑裂风险未消除，仍可能双主**
+
+**结论**：共置模式下，CMS 与 AC 共享网络命运，不能充当有效的定额投票者。n=0 时等同于纯 2 节点问题。
+
+### 2.4.2 分离模式（n≥1）：CMS 独立部署
+
+```
+设备-1: AC进程          → Hazelcast 看到 1 个成员（AC-1）
+设备-2: AC进程          → Hazelcast 看到 1 个成员（AC-2）
+设备-3..n+2: CMS进程    → Hazelcast 看到 n 个成员（CMS-1..CMS-n）
+总计: n+2 个 Hazelcast 成员
+```
+
+当 n≥1 时，总成员数 ≥3。网络分区时：
+- 任何一边若包含 ≥2 个成员（含至少 1 台 CMS），则满足定额
+- 只有 1 个成员的一边不满足定额 → 停止服务
+- **不存在两边同时满足定额的情况**
+
+**结论**：分离模式下无需额外见证节点，Hazelcast 定额机制自然防止脑裂。
+
+### 2.4.3 CMS 应配置为 Lite Member
+
+CMS 作为纯管理节点，不应持有数据分区，也不应影响集群的"定员"（data member count）计算。
+
+在 CMS 的 Hazelcast 配置中设置：
+```java
+config.setLiteMember(true);
+```
+
+Lite Member 特性：
+- 参与集群成员列表和心跳
+- **不持有数据分区**
+- **不计入定员（member count）**
+- 集群扩缩容时，Lite Member 的加入/离开不影响数据分区的重新分配
+
+这样 CMS 的扩缩容不会影响 AC HA 的稳定性。
+
+---
+
 ## 3. 方案选项
 
 ### 3.1 选项 A — 启用 `requireMajority`（双节点，安全但分区时不可用）
@@ -159,11 +217,15 @@ cluster:
 
 **恢复**：Hazelcast 集群重新合并时自动恢复。需要生命周期监听器（见 §6.3）在合并后触发角色重新评估。
 
-**结论**：对于纯双节点方案来说是正确且简单的。接受分区期间的不可用以换取安全性。推荐基线方案。
+**适用场景**：
+- n=0（共置模式）：推荐基线方案。接受分区期间不可用以换取安全性。
+- n≥1（分离模式）：此选项过于保守。分离模式下定额已自然满足，无需特意限制。
+
+**结论**：仅当 n=0（共置模式）时作为基线方案。n≥1 时请看选项 B。
 
 ---
 
-### 3.2 选项 B — 轻量见证节点（无需完整业务逻辑的定额）
+### 3.2 选项 B — 分离部署 + Lite Member CMS（推荐 n≥1 场景）
 
 **机制**：第 3 台机器运行一个最小的 Hazelcast 成员（无 DHCP、无 HTTP、无 H2）来提供决胜投票。3 个成员且 `minimum-cluster-size: 2`：
 
@@ -195,7 +257,14 @@ join.getTcpIpConfig().setEnabled(true)
 Hazelcast.newHazelcastInstance(config);
 ```
 
-**结论**：最优架构。如果有第 3 台机器，强烈推荐。现有 AC 代码改动最小（只需启用 `require-majority: true` 并在 `cluster.yml` 中设置 `members`）。
+**适用场景**：n≥1（分离模式）。总成员数 = n+2 ≥3，天然满足定额，无需额外见证节点。
+
+**CMS 配置要求**：
+1. CMS 的 Hazelcast 实例设置 `config.setLiteMember(true)`
+2. AC 保持 `require-majority: true`，`minimum-cluster-size: 2`
+3. 所有节点（AC+CMS）的 `cluster.members` 配置为统一的 n+2 个地址列表
+
+**结论**：n≥1 时的最优方案。无需额外见证节点，AC 代码改动最小。
 
 ---
 
@@ -879,6 +948,43 @@ java -Xms64m -Xmx128m \
 // 在 HazelcastConfiguration.java 中 —— 添加到 config
 config.setProperty("hazelcast.max.no.heartbeat.seconds", "10");
 config.setProperty("hazelcast.heartbeat.interval.seconds", "1");
+```
+
+---
+
+### 6.X CMS Lite Member 配置（Spring Boot 或独立进程）
+
+在 CMS 进程中初始化 Hazelcast 时：
+
+```java
+Config config = new Config();
+config.setClusterName("ha-dhcp");
+config.setLiteMember(true);  // ← 关键：CMS 不存储数据分区
+config.getNetworkConfig().setPort(5701);
+JoinConfig join = config.getNetworkConfig().getJoin();
+join.getMulticastConfig().setEnabled(false);
+join.getTcpIpConfig().setEnabled(true)
+    .addMember("AC1_IP:5701")
+    .addMember("AC2_IP:5701")
+    .addMember("CMS1_IP:5701")
+    .addMember("CMS2_IP:5701");  // 根据实际 CMS 数量添加
+
+// 不需要 MapConfig —— Lite Member 不存储数据
+HazelcastInstance hz = Hazelcast.newHazelcastInstance(config);
+```
+
+或者如果是 Spring Boot 管理的 Hazelcast（通过 `HazelcastConfiguration.java` 类似的配置类）：
+
+```java
+@Bean
+public HazelcastInstance cmsHazelcastInstance() {
+    Config config = new Config();
+    config.setClusterName(clusterProperties.getName());
+    config.setLiteMember(true);  // ← 关键
+    config.getNetworkConfig().setPort(clusterProperties.getPort());
+    // ... 其余网络配置与 AC 相同
+    return Hazelcast.newHazelcastInstance(config);
+}
 ```
 
 ---
