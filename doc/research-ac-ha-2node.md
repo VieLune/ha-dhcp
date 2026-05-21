@@ -1,39 +1,39 @@
-# 2-Node AC High Availability — Split-Brain Analysis and Recommended Solution
+# 双节点 AC 高可用 — 脑裂问题分析与推荐方案
 
-**Project**: ha-dhcp  
-**Date**: 2026-05-21  
-**Scope**: 2 AC nodes only (no CMS), Spring Boot 3.3.6 + Hazelcast 5.5.0 AP + Keepalived  
-**Status**: Research / Design
-
----
-
-## Table of Contents
-
-1. [Current Architecture Snapshot](#1-current-architecture-snapshot)
-2. [The 2-Node Split-Brain Problem](#2-the-2-node-split-brain-problem)
-3. [Solution Options](#3-solution-options)
-4. [Recommended Solution](#4-recommended-solution)
-5. [Failover Design](#5-failover-design)
-6. [Code Snippets](#6-code-snippets)
-7. [Verification Test Plan](#7-verification-test-plan)
-8. [Risk Assessment](#8-risk-assessment)
+**项目**：ha-dhcp  
+**日期**：2026-05-21  
+**范围**：仅 2 台 AC 节点（无 CMS），Spring Boot 3.3.6 + Hazelcast 5.5.0 AP + Keepalived  
+**状态**：研究 / 设计阶段
 
 ---
 
-## 1. Current Architecture Snapshot
+## 目录
 
-### 1.1 Components
+1. [当前架构快照](#1-当前架构快照)
+2. [双节点脑裂问题](#2-双节点脑裂问题)
+3. [方案选项](#3-方案选项)
+4. [推荐方案](#4-推荐方案)
+5. [故障转移设计](#5-故障转移设计)
+6. [代码片段](#6-代码片段)
+7. [验证测试计划](#7-验证测试计划)
+8. [风险评估](#8-风险评估)
 
-| Component | Role | Key Config |
-|-----------|------|------------|
-| Spring Boot 3.3.6 | DHCP server + HA state machine | port 8080, DHCP 1067 |
-| Hazelcast 5.5.0 (AP) | Distributed lease store | port 5701, `dhcp:leases` backupCount=1 |
-| Keepalived | VIP management via VRRP | AC-1 priority=110, AC-2 priority=100, nopreempt, unicast |
-| H2 + Flyway + JPA | Local lease mirror | `./data/ha-dhcp` |
+---
 
-### 1.2 Key Code Paths
+## 1. 当前架构快照
 
-**`HazelcastDhcpLeaseStore.isAvailable()`** (`HazelcastDhcpLeaseStore.java:52-58`):
+### 1.1 组件
+
+| 组件 | 角色 | 关键配置 |
+|------|------|----------|
+| Spring Boot 3.3.6 | DHCP 服务器 + HA 状态机 | 端口 8080，DHCP 1067 |
+| Hazelcast 5.5.0（AP） | 分布式租约存储 | 端口 5701，`dhcp:leases` backupCount=1 |
+| Keepalived | 通过 VRRP 管理 VIP | AC-1 priority=110，AC-2 priority=100，nopreempt，unicast |
+| H2 + Flyway + JPA | 本地租约镜像 | `./data/ha-dhcp` |
+
+### 1.2 关键代码路径
+
+**`HazelcastDhcpLeaseStore.isAvailable()`**（`HazelcastDhcpLeaseStore.java:52-58`）：
 ```java
 public boolean isAvailable() {
     LifecycleService lifecycleService = hazelcastInstance.getLifecycleService();
@@ -43,7 +43,7 @@ public boolean isAvailable() {
 }
 ```
 
-**`HaService.canServeDhcp()`** (`HaService.java:55-61`):
+**`HaService.canServeDhcp()`**（`HaService.java:55-61`）：
 ```java
 public boolean canServeDhcp() {
     return dhcpProperties.isEnabled()
@@ -54,133 +54,133 @@ public boolean canServeDhcp() {
 }
 ```
 
-**`HaService.hasVip()`** checks the OS network interface for the VIP address — it is a real OS-level check, not a cached flag.
+**`HaService.hasVip()`** 检查操作系统网卡上是否绑定了 VIP 地址 —— 这是一个真实的 OS 级别检查，不是缓存标志。
 
-### 1.3 Current `application.yml` (relevant excerpt)
+### 1.3 当前 `application.yml`（相关摘录）
 
 ```yaml
 ha:
-  vip: 127.0.0.1          # change to real VIP in production
-  require-majority: false  # ← currently disabled
+  vip: 127.0.0.1          # 生产环境需改为真实 VIP
+  require-majority: false  # ← 当前已禁用
   minimum-cluster-size: 2
 
 cluster:
   name: ha-dhcp
   port: 5701
-  members: []              # ← empty = multicast discovery
+  members: []              # ← 空数组 = 组播发现
 ```
 
-**Critical gap**: `require-majority: false` means `isAvailable()` always returns `true` as long as Hazelcast is running — regardless of how many cluster members exist. This is unsafe in a production 2-node deployment.
+**关键缺陷**：`require-majority: false` 意味着只要 Hazelcast 在运行，`isAvailable()` 就始终返回 `true` —— 无论集群中有多少个成员。这在生产环境的双节点部署中是不安全的。
 
 ---
 
-## 2. The 2-Node Split-Brain Problem
+## 2. 双节点脑裂问题
 
-### 2.1 Quorum Theory
+### 2.1 定额理论
 
-For N nodes, a safe quorum requires ⌊N/2⌋+1 votes. With N=2:
-- Quorum = 2 nodes
-- Any partition produces two sides of size 1
-- Neither side alone has quorum
+对于 N 个节点，安全的定额需要 ⌊N/2⌋+1 票。当 N=2 时：
+- 定额 = 2 个节点
+- 任何分区都会产生两边各 1 个节点
+- 任何一边单独都不满足定额
 
-The 2-node problem is structurally irresolvable without a tiebreaker: **every network partition produces either total unavailability (safe) or dual-master (unsafe)** — you must choose which failure mode you prefer.
+双节点问题在没有仲裁者的情况下是结构上无法解决的：**每次网络分区要么导致完全不可用（安全），要么导致双主（不安全）** —— 你必须选择哪种故障模式更可接受。
 
-### 2.2 VRRP Split-Brain Scenario (the Specific Risk Here)
+### 2.2 VRRP 脑裂场景（这里的具体风险）
 
-Step-by-step with current keepalived config:
+使用当前 keepalived 配置逐步分析：
 
 ```
-Initial state:
-  AC-1: VRRP state=MASTER, priority=110, VIP bound to eth0
-  AC-2: VRRP state=BACKUP, priority=100, no VIP
+初始状态：
+  AC-1: VRRP state=MASTER, priority=110, VIP 绑定到 eth0
+  AC-2: VRRP state=BACKUP, priority=100, 无 VIP
 
-Network partition begins (AC-1 ↔ AC-2 link severed):
+网络分区开始（AC-1 ↔ AC-2 链路断开）：
 
   AC-1:
-    → Continues sending VRRP adverts to unicast peer AC-2 (packets dropped)
-    → AC-1 has no reason to yield the VIP
-    → VIP remains on AC-1's eth0
-    → keepalived state: still MASTER
+    → 继续向单播对等节点 AC-2 发送 VRRP 广告（包被丢弃）
+    → AC-1 没有理由放弃 VIP
+    → VIP 保留在 AC-1 的 eth0 上
+    → keepalived 状态：仍然是 MASTER
 
   AC-2:
-    → Stops receiving VRRP adverts from AC-1
-    → Dead interval = advert_int * ((256 - priority_of_master) / 256) ≈ 1s
-    → Promotes itself to MASTER
-    → Binds VIP to its own eth0
-    → Calls notify.sh MASTER → Spring Boot role=MASTER
+    → 停止收到来自 AC-1 的 VRRP 广告
+    → 失效间隔 = advert_int * ((256 - priority_of_master) / 256) ≈ 1s
+    → 自我提升为 MASTER
+    → 将 VIP 绑定到自己的 eth0 上
+    → 调用 notify.sh MASTER → Spring Boot role=MASTER
 
-Result after partition:
+分区后的结果：
   AC-1: VIP=yes, role=MASTER, Hazelcast members=1
   AC-2: VIP=yes, role=MASTER, Hazelcast members=1
 
-  canServeDhcp() with current config (require-majority=false):
+  使用当前配置（require-majority=false）的 canServeDhcp()：
     AC-1: enabled=T, role=MASTER, mirror=T, authority=T(requireMajority=F), hasVip=T → true
     AC-2: enabled=T, role=MASTER, mirror=T, authority=T(requireMajority=F), hasVip=T → true
 
-  ⟹ DUAL DHCP MASTER — both respond to DISCOVER/REQUEST
-  ⟹ IP conflict risk if they allocate from overlapping address pools
+  ⟹ 双 DHCP MASTER — 两者都响应 DISCOVER/REQUEST
+  ⟹ 如果它们从重叠的地址池中分配，存在 IP 冲突风险
 ```
 
-**`nopreempt` does not help here.** `nopreempt` only prevents the higher-priority node from reclaiming VIP after it recovers — it does not prevent a BACKUP node from self-promoting when it cannot hear the MASTER.
+**`nopreempt` 在这里没有帮助。** `nopreempt` 只能防止高优先级节点在恢复后重新抢占 VIP —— 它不能阻止 BACKUP 节点在听不到 MASTER 时自我提升。
 
-### 2.3 What Happens to Hazelcast During Partition
+### 2.3 分区期间 Hazelcast 会发生什么
 
-| Scenario | AC-1 members | AC-2 members | `isAvailable()` (requireMajority=false) | `isAvailable()` (requireMajority=true) |
-|----------|-------------|-------------|----------------------------------------|----------------------------------------|
-| Normal | 2 | 2 | true | true |
-| AC-1 process crash | — | 1 (after timeout) | true | **false** |
-| Network partition | 1 | 1 | true | **false** |
+| 场景 | AC-1 成员数 | AC-2 成员数 | `isAvailable()`（requireMajority=false） | `isAvailable()`（requireMajority=true） |
+|------|-------------|-------------|----------------------------------------|----------------------------------------|
+| 正常 | 2 | 2 | true | true |
+| AC-1 进程崩溃 | — | 1（超时后） | true | **false** |
+| 网络分区 | 1 | 1 | true | **false** |
 
-With `require-majority: true` and `minimum-cluster-size: 2`, `isAvailable()` returns `false` on both sides of a partition → `canServeDhcp()` returns `false` → no dual-master. This is the core fix.
+使用 `require-majority: true` 和 `minimum-cluster-size: 2`，`isAvailable()` 在分区两边都返回 `false` → `canServeDhcp()` 返回 `false` → 无双主。这是核心修复。
 
-**Hazelcast member removal timing** (critical for timeline planning):
+**Hazelcast 成员移除时机**（对时间线规划至关重要）：
 
-- **Process crash**: TCP RST or connection refused detected almost immediately; Hazelcast removes the member within ~5–10 seconds.
-- **Network partition** (firewall drop, no RST): Hazelcast must wait for heartbeat timeout. Default `hazelcast.max.no.heartbeat.seconds` = 60 seconds. This is a 60-second window of potential dual-master if requireMajority is not set.
+- **进程崩溃**：TCP RST 或连接被拒绝被立即检测到；Hazelcast 在 ~5–10 秒内移除该成员。
+- **网络分区**（防火墙丢弃，无 RST）：Hazelcast 必须等待心跳超时。默认 `hazelcast.max.no.heartbeat.seconds` = 60 秒。如果未设置 requireMajority，这是 60 秒的潜在双主窗口。
 
 ---
 
-## 3. Solution Options
+## 3. 方案选项
 
-### 3.1 Option A — Enable `requireMajority` (2-Node, Safe but Unavailable on Partition)
+### 3.1 选项 A — 启用 `requireMajority`（双节点，安全但分区时不可用）
 
-**Mechanism**: Set `require-majority: true`. During partition each node has 1 member < `minimum-cluster-size: 2`, so `isAvailable()` returns `false`, `canServeDhcp()` returns `false` on both nodes.
+**机制**：设置 `require-majority: true`。分区期间每个节点只有 1 个成员 < `minimum-cluster-size: 2`，所以 `isAvailable()` 返回 `false`，`canServeDhcp()` 在两边都返回 `false`。
 
-**Behavior matrix**:
+**行为矩阵**：
 
-| Event | Result |
-|-------|--------|
-| AC-1 crashes (process) | AC-2: Hazelcast drops AC-1 in ~10s, VIP drifts via keepalived → AC-2 serves (normal failover) |
-| AC-2 crashes | Symmetric — AC-1 continues |
-| Network partition | Both nodes stop serving DHCP. Existing leases hold until partition heals. |
-| Partition heals | Hazelcast re-forms cluster, member count goes to 2, `isAvailable()=true`. Role re-evaluation required (see §6.3). |
+| 事件 | 结果 |
+|------|------|
+| AC-1 崩溃（进程） | AC-2：Hazelcast ~10s 内移除 AC-1，VIP 通过 keepalived 漂移 → AC-2 提供服务（正常故障转移） |
+| AC-2 崩溃 | 对称 —— AC-1 继续 |
+| 网络分区 | 两个节点都停止提供 DHCP。现有租约保持到分区恢复。 |
+| 分区恢复 | Hazelcast 重新组成集群，成员数变为 2，`isAvailable()=true`。需要角色重新评估（见 §6.3）。 |
 
-**Impact on existing clients**: DHCP leases are typically T=3600s; clients renew at T/2=1800s. During a short partition (seconds to minutes), clients with valid leases continue operating. Only new join attempts fail.
+**对现有客户端的影响**：DHCP 租约通常是 T=3600s；客户端在 T/2=1800s 时续租。在短暂分区（秒到分钟）期间，持有有效租约的客户端继续运行。只有新加入请求失败。
 
-**Recovery**: Automatic when Hazelcast cluster re-merges. Requires a lifecycle listener (see §6.3) to trigger role re-evaluation after merge.
+**恢复**：Hazelcast 集群重新合并时自动恢复。需要生命周期监听器（见 §6.3）在合并后触发角色重新评估。
 
-**Verdict**: Correct and simple for pure 2-node. Accepts unavailability during partition in exchange for safety. Recommended baseline.
+**结论**：对于纯双节点方案来说是正确且简单的。接受分区期间的不可用以换取安全性。推荐基线方案。
 
 ---
 
-### 3.2 Option B — Lightweight Witness Node (Quorum Without Full Business Logic)
+### 3.2 选项 B — 轻量见证节点（无需完整业务逻辑的定额）
 
-**Mechanism**: A 3rd machine runs a minimal Hazelcast member (no DHCP, no HTTP, no H2) to provide the tiebreaker vote. With 3 members and `minimum-cluster-size: 2`:
+**机制**：第 3 台机器运行一个最小的 Hazelcast 成员（无 DHCP、无 HTTP、无 H2）来提供决胜投票。3 个成员且 `minimum-cluster-size: 2`：
 
 ```
-Partition scenario → quorum result:
-  AC-1 isolated (1 member):          loses quorum → stops serving
-  AC-2 + Witness (2 members):        has quorum → AC-2 can serve
-  AC-1 + Witness (2 members):        has quorum → AC-1 can serve
-  AC-1 + AC-2, Witness fails (2):    has quorum → normal operation continues
-  All three isolated:                 none serve
+分区场景 → 定额结果：
+  AC-1 隔离（1 个成员）：          失去定额 → 停止服务
+  AC-2 + 见证节点（2 个成员）：     有定额 → AC-2 可以服务
+  AC-1 + 见证节点（2 个成员）：     有定额 → AC-1 可以服务
+  AC-1 + AC-2，见证节点故障（2）： 有定额 → 正常运作继续
+  三个都隔离：                     无服务
 ```
 
-No scenario results in dual-master. This is the strongest 2-node-AC solution.
+没有任何场景会产生双主。这是最强大的双节点 AC 解决方案。
 
-**Witness node requirements**: Java 21, ~256 MB RAM, ~50 MB disk. Can be a Raspberry Pi 4, a small VM, or a Docker container on a separate host from AC-1/AC-2.
+**见证节点要求**：Java 21，~256 MB RAM，~50 MB 磁盘。可以是树莓派 4、小型 VM 或 Docker 容器，放在与 AC-1/AC-2 不同的主机上。
 
-**Witness Hazelcast config** (standalone, no Spring Boot required):
+**见证节点 Hazelcast 配置**（独立运行，无需 Spring Boot）：
 
 ```java
 Config config = new Config();
@@ -191,30 +191,30 @@ join.getMulticastConfig().setEnabled(false);
 join.getTcpIpConfig().setEnabled(true)
     .addMember("AC1_IP:5701")
     .addMember("AC2_IP:5701");
-// No MapConfig needed — witness does not store data
+// 不需要 MapConfig —— 见证节点不存储数据
 Hazelcast.newHazelcastInstance(config);
 ```
 
-**Verdict**: Optimal architecture. Highly recommended if a 3rd machine is available. Existing AC code changes are minimal (just enable `require-majority: true` and set `members` in `cluster.yml`).
+**结论**：最优架构。如果有第 3 台机器，强烈推荐。现有 AC 代码改动最小（只需启用 `require-majority: true` 并在 `cluster.yml` 中设置 `members`）。
 
 ---
 
-### 3.3 Option C — STONITH / Hardware Fencing
+### 3.3 选项 C — STONITH / 硬件隔离
 
-**Mechanism**: When node A detects node B has failed, A calls a fencing agent (IPMI, PDU API, managed switch port disable) to power-cycle or network-isolate B before A takes over.
+**机制**：当节点 A 检测到节点 B 故障时，A 调用隔离代理（IPMI、PDU API、管理型交换机端口禁用）来重启或网络隔离 B，然后 A 接管。
 
-**For this project**:
-- Requires IPMI/BMC or PDU API access on both machines
-- `notify_master` in keepalived calls a fence script before binding VIP
-- Ensures the loser cannot have a live process after the winner claims MASTER
-- Prevents "zombie master" scenarios
+**对于本项目**：
+- 需要两台机器的 IPMI/BMC 或 PDU API 访问权限
+- keepalived 中的 `notify_master` 在绑定 VIP 之前调用隔离脚本
+- 确保失败者无法在获胜者声明 MASTER 后保持存活进程
+- 防止“僵尸主节点”场景
 
-**Sample keepalived hook addition** (`keepalived-ac1.conf`):
+**keepalived 钩子示例**（`keepalived-ac1.conf`）：
 ```
 notify_master "/etc/keepalived/fence_peer.sh MASTER AC2_IPMI_IP"
 ```
 
-**`fence_peer.sh`** (pseudocode):
+**`fence_peer.sh`**（伪代码）：
 ```bash
 #!/usr/bin/env bash
 ROLE="$1"; PEER_IPMI="$2"
@@ -225,234 +225,234 @@ if [ "$ROLE" = "MASTER" ]; then
 fi
 ```
 
-**Verdict**: Very robust but requires dedicated IPMI/BMC hardware. Complex to set up and test. Overkill for most DHCP deployments. Useful only when hardware infrastructure already has out-of-band management.
+**结论**：非常健壮，但需要专用 IPMI/BMC 硬件。设置和测试复杂。对于大多数 DHCP 部署来说过度设计。仅在硬件基础设施已有带外管理时才考虑。
 
 ---
 
-### 3.4 Option D — Can Keepalived Alone Solve Split-Brain?
+### 3.4 选项 D — Keepalived 本身能否解决脑裂？
 
-**Short answer**: No.
+**简短回答**：不能。
 
-As shown in §2.2, VRRP unicast with `nopreempt` does not prevent both nodes from having VIP during a network partition. VRRP is designed to handle node failure, not network partition.
+如 §2.2 所示，使用 `nopreempt` 的 VRRP 单播无法阻止网络分区期间两个节点同时拥有 VIP。VRRP 设计用于处理节点故障，而非网络分区。
 
-**What keepalived does well**:
-- Fast health-check-based failover when one node's app dies (check_app.sh)
-- VIP management and GARP after failover
-- `nopreempt` prevents unnecessary VIP flapping on recovery
+**Keepalived 擅长什么**：
+- 当一个节点的应用死亡时，基于健康检查的快速故障转移（check_app.sh）
+- 故障转移后的 VIP 管理和 GARP
+- `nopreempt` 防止恢复时不必要的 VIP 抖动
 
-**What keepalived cannot do**:
-- Guarantee at-most-one VIP holder during a network partition
-- Coordinate distributed state between nodes
+**Keepalived 无法做到什么**：
+- 在网络分区期间保证至多一个 VIP 持有者
+- 协调节点间的分布式状态
 
-**Conclusion**: Keepalived is necessary but not sufficient. It must be combined with Option A or B.
+**结论**：Keepalived 是必要的，但不足够。必须与选项 A 或 B 结合使用。
 
 ---
 
-### 3.5 Option E — Hazelcast CP Subsystem with 2 Nodes
+### 3.5 选项 E — 双节点 Hazelcast CP Subsystem
 
-CP Subsystem (Raft) requires a minimum CP group of 3 members (tolerates 1 failure). With 2 AC nodes:
+CP Subsystem（Raft）需要最少 3 个成员的 CP 组（容忍 1 个故障）。使用 2 个 AC 节点：
 
-- 2-node CP group: cannot reach quorum if 1 fails → not viable
-- 2 AC + 1 witness as CP members: viable, but the witness must be a Raft participant (not a lightweight member)
+- 2 节点 CP 组：1 个故障时无法达到定额 → 不可行
+- 2 AC + 1 见证节点作为 CP 成员：可行，但见证节点必须是 Raft 参与者（不是轻量成员）
 
-With CP Subsystem you could use `FencedLock` to ensure exactly one node holds the MASTER lock:
+使用 CP Subsystem 可以通过 `FencedLock` 确保恰好一个节点持有 MASTER 锁：
 ```java
 FencedLock masterLock = hazelcastInstance.getCPSubsystem().getLock("dhcp:master-lock");
 long fence = masterLock.tryLockAndGetFence();
 if (fence != FencedLock.INVALID_FENCE) {
-    // This node is the exclusive master
+    // 该节点是独占主节点
 }
 ```
 
-**Verdict**: Architecturally correct but requires 3-member CP group (i.e., a 3rd machine that participates fully in Raft), and adds significant complexity. Not recommended unless you need linearizable distributed operations beyond what SBP + requireMajority provides. For single-master DHCP, Option A or B is sufficient.
+**结论**：架构上正确，但需要 3 成员 CP 组（即第 3 台机器必须完全参与 Raft），并且增加了显著复杂度。除非你需要 SBP + requireMajority 之外的可线性化分布式操作，否则不推荐。对于单主 DHCP，选项 A 或 B 已足够。
 
 ---
 
-### 3.6 Option F — Shared Storage Arbitration
+### 3.6 选项 F — 共享存储仲裁
 
-**Mechanism**: Both nodes compete for a lock on shared storage (PostgreSQL advisory lock, NFS file lock, etcd lease). The lock holder is MASTER.
+**机制**：两个节点竞争共享存储上的锁（PostgreSQL advisory lock、NFS 文件锁、etcd 租约）。锁持有者是 MASTER。
 
-**Examples**:
-- `pg_try_advisory_lock(1)` on a shared PostgreSQL
-- etcd lease + TTL
-- Zookeeper ephemeral znode
+**示例**：
+- 共享 PostgreSQL 上的 `pg_try_advisory_lock(1)`
+- etcd 租约 + TTL
+- Zookeeper 临时 znode
 
-**Verdict**: Introduces a shared storage component as a new single point of failure. Not recommended unless the infrastructure already has a highly-available shared database. The witness node option (3.2) is simpler and avoids a new external dependency.
+**结论**：引入共享存储组件作为新的单点故障。不推荐，除非基础设施已有高可用共享数据库。见证节点选项（3.2）更简单，且避免了新的外部依赖。
 
 ---
 
-## 4. Recommended Solution
+## 4. 推荐方案
 
-### 4.1 Decision Matrix
+### 4.1 决策矩阵
 
-| Criterion | Option A (requireMajority, 2-node) | Option B (+ Witness) |
-|-----------|------------------------------------|----------------------|
-| Split-brain safe | ✅ | ✅ |
-| Available during network partition | ❌ both stop | ✅ majority partition continues |
-| Requires 3rd machine | ❌ | ✅ small VM/RPi |
-| Code changes needed | Minimal | Minimal |
-| Operational complexity | Low | Low + witness maintenance |
-| Recommended for | budget-constrained / correctness-first | production deployments |
+| 评判标准 | 选项 A（requireMajority，双节点） | 选项 B（+ 见证节点） |
+|----------|----------------------------------|----------------------|
+| 脑裂安全 | ✅ | ✅ |
+| 网络分区期间可用 | ❌ 双方都停止 | ✅ 多数分区继续 |
+| 需要第 3 台机器 | ❌ | ✅ 小型 VM/树莓派 |
+| 需要代码改动 | 最小 | 最小 |
+| 运维复杂度 | 低 | 低 + 见证节点维护 |
+| 推荐给 | 预算受限 / 正确性优先 | 生产部署 |
 
-### 4.2 Recommended: Option B (Keepalived + requireMajority + Witness)
+### 4.2 推荐：选项 B（Keepalived + requireMajority + 见证节点）
 
-For production, deploy a lightweight witness node and enable `require-majority: true`.
+对于生产环境，部署轻量见证节点并启用 `require-majority: true`。
 
-**Architecture**:
+**架构**：
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  Layer-2 Network                                                │
+│  二层网络                                                       │
 │                                                                 │
 │  ┌───────────────┐     Hazelcast     ┌───────────────┐         │
-│  │     AC-1      │◄─────cluster─────►│     AC-2      │         │
-│  │ Spring Boot   │     (TCP-IP)      │ Spring Boot   │         │
-│  │ Hazelcast     │                   │ Hazelcast     │         │
-│  │ keepalived    │                   │ keepalived    │         │
-│  │ priority=110  │                   │ priority=100  │         │
-│  └───────┬───────┘                   └───────┬───────┘         │
-│          │                                   │                  │
-│          └──────────────┬────────────────────┘                  │
-│                         │ Hazelcast cluster                     │
+│  │     AC-1      │◄─────集群──────────►│     AC-2      │         │
+│  │ Spring Boot   │     (TCP-IP)       │ Spring Boot   │         │
+│  │ Hazelcast     │                    │ Hazelcast     │         │
+│  │ keepalived    │                    │ keepalived    │         │
+│  │ priority=110  │                    │ priority=100  │         │
+│  └───────┬───────┘                    └───────┬───────┘         │
+│          │                                    │                  │
+│          └──────────────┬─────────────────────┘                  │
+│                         │ Hazelcast 集群                       │
 │                    ┌────▼────┐                                  │
-│                    │ Witness │  (Hazelcast only, no DHCP)       │
-│                    │  Node   │  small VM / RPi                  │
+│                    │ 见证节点 │  （仅 Hazelcast，无 DHCP）       │
+│                    │         │  小型 VM / 树莓派                 │
 │                    └─────────┘                                  │
 │                                                                 │
-│  VIP: floats between AC-1 and AC-2 via keepalived VRRP         │
+│  VIP：通过 keepalived VRRP 在 AC-1 和 AC-2 之间漂移            │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-**Split-brain behavior with witness**:
+**有见证节点时的脑裂行为**：
 
-| Scenario | Hazelcast quorum (≥2) | DHCP service |
-|----------|-----------------------|--------------|
-| All healthy | AC-1: 3, AC-2: 3 | MASTER serves |
-| AC-1 crashes | AC-2: 2 (AC-2+W) | AC-2 takes VIP via keepalived → serves |
-| AC-2 crashes | AC-1: 2 (AC-1+W) | AC-1 keeps VIP → continues serving |
-| Net partition AC-1 \| AC-2+W | AC-1: 1 < 2 → stops | AC-2+W: 2 → AC-2 serves |
-| Net partition AC-2 \| AC-1+W | AC-2: 1 < 2 → stops | AC-1+W: 2 → AC-1 serves |
-| Witness fails | AC-1: 2, AC-2: 2 | Normal operation |
-| All three isolated | 1, 1, 1 | No service (safe) |
+| 场景 | Hazelcast 定额（≥2） | DHCP 服务 |
+|------|----------------------|----------|
+| 全部健康 | AC-1: 3，AC-2: 3 | MASTER 提供服务 |
+| AC-1 崩溃 | AC-2: 2（AC-2+见证） | AC-2 通过 keepalived 接管 VIP → 提供服务 |
+| AC-2 崩溃 | AC-1: 2（AC-1+见证） | AC-1 保持 VIP → 继续提供服务 |
+| 网络分区 AC-1 \| AC-2+见证 | AC-1: 1 < 2 → 停止 | AC-2+见证: 2 → AC-2 提供服务 |
+| 网络分区 AC-2 \| AC-1+见证 | AC-2: 1 < 2 → 停止 | AC-1+见证: 2 → AC-1 提供服务 |
+| 见证节点故障 | AC-1: 2，AC-2: 2 | 正常运作 |
+| 三个都隔离 | 1, 1, 1 | 无服务（安全） |
 
-### 4.3 Fallback: Option A (Pure 2-Node, No Witness)
+### 4.3 备选：选项 A（纯双节点，无见证节点）
 
-If a 3rd machine is unavailable, enable `require-majority: true` only. During network partition both nodes stop serving. The tradeoff is documented and accepted.
+如果没有第 3 台机器，仅启用 `require-majority: true`。网络分区期间两个节点都停止服务。这个权衡已被记录和接受。
 
-**Key configuration change**:
+**关键配置变更**：
 ```yaml
 ha:
-  require-majority: true   # was false
-  minimum-cluster-size: 2  # unchanged
+  require-majority: true   # 原来是 false
+  minimum-cluster-size: 2  # 不变
 ```
 
-No code changes required for Option A. The logic in `HazelcastDhcpLeaseStore.isAvailable()` already handles this correctly.
+选项 A 不需要代码改动。`HazelcastDhcpLeaseStore.isAvailable()` 中的逻辑已经正确处理了这种情况。
 
 ---
 
-## 5. Failover Design
+## 5. 故障转移设计
 
-### 5.1 notify.sh and the "Spring Boot Down" Race Condition
+### 5.1 notify.sh 与“Spring Boot 宕机”竞态条件
 
-Current `notify.sh` behavior when Spring Boot is unavailable:
+Spring Boot 不可用时当前 `notify.sh` 的行为：
 ```bash
 curl -fsS --max-time 2 -X POST "${HA_NOTIFY_URL}?role=${ROLE}" \
   || logger -t ac-ha-notify "failed to notify Spring Boot: role=$ROLE"
 ```
 
-- curl fails silently (logged, non-fatal) ✅
-- Role file `/run/ac-ha-role` is still written ✅
-- **Problem**: When Spring Boot restarts, it initializes with `role=UNKNOWN` and never re-reads the role file
+- curl 静默失败（已记录，非致命）✅
+- 角色文件 `/run/ac-ha-role` 仍然写入 ✅
+- **问题**：Spring Boot 重启时以 `role=UNKNOWN` 初始化，永远不会重新读取角色文件
 
-**The gap**: keepalived calls notify.sh only on state transitions. If Spring Boot was down during the last keepalived state change, it misses its role permanently until the next transition.
+**缺口**：keepalived 只在状态转换时调用 notify.sh。如果 Spring Boot 在上一次 keepalived 状态变更时宕机，它会永久丢失角色直到下一次转换。
 
-**Fix**: On startup, read `/run/ac-ha-role` and apply role (see §6.1 — `RoleRecoveryBean`).
+**修复**：启动时读取 `/run/ac-ha-role` 并应用角色（见 §6.1 — `RoleRecoveryBean`）。
 
-**Additional concern**: There is an ordering window where keepalived promotes a node to MASTER before Spring Boot finishes startup (leaseMirrorLoaded=false). In this window, `canServeDhcp()` returns `false` even though the VIP is bound and the role is MASTER. This is correct and safe behavior — the node will not serve DHCP until the mirror is loaded.
+**额外关注**：存在一个排序窗口，keepalived 在 Spring Boot 完成启动（leaseMirrorLoaded=false）之前就将节点提升为 MASTER。在这个窗口中，即使 VIP 已绑定且角色是 MASTER，`canServeDhcp()` 也返回 `false`。这是正确且安全的行为 —— 节点在镜像加载完成之前不会提供 DHCP。
 
-### 5.2 In-Application Automatic Failover (Without External Keepalived)
+### 5.2 应用内自动故障转移（不使用外部 Keepalived）
 
-A fully in-application HA design is feasible but has a significant constraint: **VIP management requires OS-level `ip addr add/del` commands, which need `CAP_NET_ADMIN` capability or root**.
+完全应用内的高可用设计是可行的，但有一个重大限制：**VIP 管理需要 OS 级别的 `ip addr add/del` 命令，需要 `CAP_NET_ADMIN` 权限或 root**。
 
-Viable hybrid approach:
-- **Keepalived** retains responsibility for VIP (GARP, ARP table update)
-- **Spring Boot** watches its own VIP state and Hazelcast membership in a background thread
+可行的混合方案：
+- **Keepalived** 保留 VIP 责任（GARP、ARP 表更新）
+- **Spring Boot** 在后台线程中监控自己的 VIP 状态和 Hazelcast 成员关系
 
-If keepalived fails (process crash), Spring Boot can detect `hasVip()` changing and self-demote to a safe state (but cannot reclaim VIP without OS capability). This is defense-in-depth, not a replacement for keepalived.
+如果 keepalived 故障（进程崩溃），Spring Boot 可以检测到 `hasVip()` 变化并自我降级到安全状态（但没有 OS 权限无法重新获取 VIP）。这是纵深防御，不是 keepalived 的替代品。
 
-A pure in-application design would require:
-1. `CAP_NET_ADMIN` or root in the service unit
-2. Implementing GARP (or calling `arping`) on VIP takeover
-3. Implementing the VIP dead-interval timer (equivalent to VRRP)
+纯应用内设计需要：
+1. 服务单元中的 `CAP_NET_ADMIN` 或 root
+2. 在 VIP 接管时实现 GARP（或调用 `arping`）
+3. 实现 VIP 失效间隔定时器（相当于 VRRP）
 
-Not recommended given that keepalived already handles this robustly.
+不推荐，因为 keepalived 已经健壮地处理了这些。
 
-### 5.3 Complete Failover Timeline: AC-1 Crash → Client Recovery
+### 5.3 完整故障转移时间线：AC-1 崩溃 → 客户端恢复
 
 ```
-T=0s      AC-1 JVM crashes (or systemctl kill, or power failure)
-          - TCP connections to AC-1:5701 receive RST or timeout
-          - TCP connections to AC-1:8080 receive RST
+T=0s      AC-1 JVM 崩溃（或 systemctl kill，或断电）
+          - 到 AC-1:5701 的 TCP 连接收到 RST 或超时
+          - 到 AC-1:8080 的 TCP 连接收到 RST
 
-T=~2s     Hazelcast on AC-2: detects connection failure to AC-1
-          - Begins suspect/heartbeat evaluation
-          (process crash: fast; network partition: up to max.no.heartbeat.seconds=60s)
+T=~2s     AC-2 上的 Hazelcast：检测到到 AC-1 的连接故障
+          - 开始怀疑/心跳评估
+          （进程崩溃：快；网络分区：最多到 max.no.heartbeat.seconds=60s）
 
-T=2s      keepalived on AC-2: VRRP advert_int=1s, fall=2
-          - Two consecutive health check failures required
-          - check_app.sh curls AC-1's health endpoint → connection refused (max-time=1s)
-          - Fall threshold reached at ~T=4s (2 intervals × 2s)
+T=2s      AC-2 上的 keepalived：VRRP advert_int=1s，fall=2
+          - 需要两次连续健康检查失败
+          - check_app.sh curl AC-1 的健康端点 → 连接被拒绝（max-time=1s）
+          - 在 ~T=4s 达到 fall 阈值（2 个间隔 × 2s）
 
-T=4s      keepalived AC-2: transitions BACKUP → MASTER
-          - Binds VIP to AC-2's eth0
-          - Sends GARP (garp_master_delay=1s, repeat=3, configured in keepalived-ac2.conf)
-          - Calls: notify.sh MASTER
+T=4s      keepalived AC-2：BACKUP → MASTER 转换
+          - 将 VIP 绑定到 AC-2 的 eth0
+          - 发送 GARP（garp_master_delay=1s，repeat=3，在 keepalived-ac2.conf 中配置）
+          - 调用：notify.sh MASTER
 
-T=4s      notify.sh on AC-2:
-          - Writes "MASTER" to /run/ac-ha-role
-          - POSTs to http://127.0.0.1:8080/internal/ha/role?role=MASTER
-          - Spring Boot: HaService.updateRole(MASTER)
+T=4s      AC-2 上的 notify.sh：
+          - 将 "MASTER" 写入 /run/ac-ha-role
+          - POST 到 http://127.0.0.1:8080/internal/ha/role?role=MASTER
+          - Spring Boot：HaService.updateRole(MASTER)
 
-T=5-7s    Network switches update ARP cache for VIP → now points to AC-2's MAC
-          (GARP forces immediate ARP table update on all connected devices)
+T=5-7s    网络交换机更新 VIP 的 ARP 缓存 → 现在指向 AC-2 的 MAC
+          （GARP 强制所有连接设备立即更新 ARP 表）
 
-T=5-10s   Hazelcast on AC-2: removes AC-1 member (TCP RST detected fast)
-          - memberCount() drops to 1 temporarily IF witness not present
-            → With witness: memberCount=2, isAvailable()=true ✓
-            → Without witness + requireMajority=true: isAvailable()=false (BRIEF OUTAGE)
+T=5-10s   AC-2 上的 Hazelcast：移除 AC-1 成员（TCP RST 被快速检测到）
+          - 如果没有见证节点，memberCount() 暂时降到 1
+            → 有见证节点：memberCount=2，isAvailable()=true ✓
+            → 无见证节点 + requireMajority=true：isAvailable()=false（短暂中断）
 
-T=~10s    (No witness scenario) AC-2 has role=MASTER, VIP=yes, but authority=unavailable
+T=~10s    （无见证节点场景）AC-2 有 role=MASTER，VIP=yes，但 authority 不可用
           → canServeDhcp()=false
-          → AC-2 cannot serve until Hazelcast finalizes member removal
+          → AC-2 在 Hazelcast 完成成员移除之前无法服务
 
-T=~15s    (No witness scenario) Hazelcast fully removes AC-1 from cluster membership
-          → memberCount stays at 1 (no witness)
-          → With requireMajority=true: isAvailable()=false permanently until AC-1 rejoins
-          *** THIS IS THE 2-NODE PURE OPTION A TRADE-OFF ***
+T=~15s    （无见证节点场景）Hazelcast 将 AC-1 从集群成员中完全移除
+          → memberCount 保持在 1（无见证节点）
+          → 使用 requireMajority=true：isAvailable()=false，直到 AC-1 重新加入
+          *** 这是纯双节点选项 A 的权衡 ***
 
-T=~10s    (With witness) Hazelcast cluster: AC-2 + Witness = 2 members
+T=~10s    （有见证节点）Hazelcast 集群：AC-2 + 见证节点 = 2 个成员
           → isAvailable()=true
           → canServeDhcp()=true
-          → AC-2 responds to DHCP requests
+          → AC-2 响应 DHCP 请求
 
-T=5-15s   DHCP clients: ARP resolves VIP to AC-2, requests reach AC-2
-T=10-20s  Full recovery for DHCP clients
+T=5-15s   DHCP 客户端：ARP 解析 VIP 到 AC-2，请求到达 AC-2
+T=10-20s  DHCP 客户端完全恢复
 ```
 
-**Summary**:
-- With witness: ~10–15 seconds to full recovery
-- Without witness + requireMajority=true: AC-2 cannot serve until AC-1 rejoins (indefinite)
-- Without witness + requireMajority=false: ~10s recovery but split-brain risk remains
+**总结**：
+- 有见证节点：~10–15 秒完全恢复
+- 无见证节点 + requireMajority=true：AC-2 在 AC-1 重新加入之前无法服务（无限期）
+- 无见证节点 + requireMajority=false：~10s 恢复但脑裂风险仍然存在
 
-### 5.4 Hazelcast Merge Policy After Partition Heal
+### 5.4 分区愈合后的 Hazelcast 合并策略
 
-When a network partition heals, Hazelcast detects the split cluster and merges the smaller into the larger. The merge process:
+当网络分区愈合时，Hazelcast 检测分裂的集群并将较小的合并到较大的中。合并过程：
 
-1. The "losing" (smaller) cluster member receives a `MERGING` lifecycle event
-2. It disconnects, re-joins the larger cluster
-3. Map entries are reconciled using the configured `MergePolicyConfig`
-4. A `MERGED` lifecycle event is fired on the rejoining member
+1. "失败"（较小）的集群成员收到 `MERGING` 生命周期事件
+2. 它断开连接，重新加入较大的集群
+3. Map 条目使用配置的 `MergePolicyConfig` 进行调和
+4. 在重新加入的成员上触发 `MERGED` 生命周期事件
 
-For DHCP leases, use `LatestUpdateMergePolicy` — the entry with the most recent update timestamp wins:
+对于 DHCP 租约，使用 `LatestUpdateMergePolicy` —— 最新更新时间戳的条目获胜：
 ```java
 MapConfig leases = new MapConfig("dhcp:leases");
 leases.getMergePolicyConfig()
@@ -460,17 +460,17 @@ leases.getMergePolicyConfig()
     .setBatchSize(100);
 ```
 
-After merge, the application must re-evaluate its role (see §6.3 — `HazelcastPartitionListener`).
+合并后，应用必须重新评估其角色（见 §6.3 — `HazelcastPartitionListener`）。
 
 ---
 
-## 6. Code Snippets
+## 6. 代码片段
 
-All snippets are ready for direct use in the existing Spring Boot project.
+所有片段都可在现有 Spring Boot 项目中直接使用。
 
-### 6.1 Spring Boot Startup Role Recovery
+### 6.1 Spring Boot 启动角色恢复
 
-Reads role from `/run/ac-ha-role` when keepalived couldn't reach Spring Boot during a prior state transition.
+当 keepalived 在先前状态转换期间无法到达 Spring Boot 时，从 `/run/ac-ha-role` 读取角色。
 
 ```java
 package com.hadhcp.ha;
@@ -487,10 +487,8 @@ import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 
 /**
- * Reads the keepalived role file on startup to recover from the case where
- * Spring Boot was down when keepalived last changed state.
- * Runs after Hazelcast and the lease mirror are initialized (Order=10 assumes
- * lease mirror loading happens at a lower order number).
+ * 读取 keepalived 角色文件以从 Spring Boot 在 keepalived 上次变更状态时宕机的情况中恢复。
+ * 在 Hazelcast 和租约镜像初始化之后运行（Order=10 假设租约镜像加载发生在更小的 order number）。
  */
 @Component
 @Order(10)
@@ -510,25 +508,25 @@ public class RoleRecoveryBean implements ApplicationRunner {
     @Override
     public void run(ApplicationArguments args) throws Exception {
         if (haService.role() != HaRole.UNKNOWN) {
-            // Role was set via API before runner executed — skip file recovery
+            // 角色在 runner 执行之前已通过 API 设置 —— 跳过文件恢复
             return;
         }
         Path roleFile = Path.of(roleFilePath);
         if (!Files.exists(roleFile)) {
-            log.info("No role file at {}; keeping role=UNKNOWN until keepalived notifies", roleFilePath);
+            log.info("角色文件 {} 不存在；保持 role=UNKNOWN 直到 keepalived 通知", roleFilePath);
             return;
         }
         try {
             String raw = Files.readString(roleFile).strip();
             HaRole recovered = mapKeepalivedRole(raw);
             haService.updateRole(recovered);
-            log.info("Recovered HA role from {}: {} -> {}", roleFilePath, raw, recovered);
+            log.info("从 {} 恢复 HA 角色：{} -> {}", roleFilePath, raw, recovered);
         } catch (IOException e) {
-            log.warn("Failed to read role file {}: {}", roleFilePath, e.getMessage());
+            log.warn("读取角色文件 {} 失败：{}", roleFilePath, e.getMessage());
         }
     }
 
-    /** Maps keepalived VRRP state names to internal HaRole. */
+    /** 将 keepalived VRRP 状态名映射为内部 HaRole。 */
     private HaRole mapKeepalivedRole(String keepalivedState) {
         return switch (keepalivedState.toUpperCase()) {
             case "MASTER"  -> HaRole.MASTER;
@@ -536,7 +534,7 @@ public class RoleRecoveryBean implements ApplicationRunner {
             case "FAULT"   -> HaRole.FAULT;
             case "STOP"    -> HaRole.STOP;
             default -> {
-                log.warn("Unknown keepalived state '{}', defaulting to UNKNOWN", keepalivedState);
+                log.warn("未知的 keepalived 状态 '{}'，默认设为 UNKNOWN", keepalivedState);
                 yield HaRole.UNKNOWN;
             }
         };
@@ -546,9 +544,9 @@ public class RoleRecoveryBean implements ApplicationRunner {
 
 ---
 
-### 6.2 Hazelcast Configuration with Split-Brain Protection and Merge Policy
+### 6.2 带有脑裂保护和合并策略的 Hazelcast 配置
 
-Extends `HazelcastConfiguration.java` to add SBP and merge policy:
+扩展 `HazelcastConfiguration.java` 以添加 SBP 和合并策略：
 
 ```java
 package com.hadhcp.config;
@@ -585,8 +583,7 @@ public class HazelcastConfiguration {
         join.getTcpIpConfig().setEnabled(!properties.getMembers().isEmpty());
         properties.getMembers().forEach(join.getTcpIpConfig()::addMember);
 
-        // Split-brain protection: map operations throw SplitBrainProtectionException
-        // when the cluster has fewer than minimumClusterSize members.
+        // 脑裂保护：当集群成员少于 minimumClusterSize 时，map 操作抛出 SplitBrainProtectionException
         if (haProperties.isRequireMajority()) {
             SplitBrainProtectionConfig sbp = new SplitBrainProtectionConfig()
                     .setName(SBP_NAME)
@@ -599,7 +596,7 @@ public class HazelcastConfiguration {
         MapConfig leases = new MapConfig("dhcp:leases");
         leases.setBackupCount(1);
         leases.setAsyncBackupCount(0);
-        // Most-recent write wins on split-brain merge
+        // 脑裂合并时最新写入获胜
         leases.setMergePolicyConfig(
             new MergePolicyConfig("com.hazelcast.spi.merge.LatestUpdateMergePolicy", 100));
         if (haProperties.isRequireMajority()) {
@@ -614,9 +611,9 @@ public class HazelcastConfiguration {
 
 ---
 
-### 6.3 Hazelcast Partition-Heal Listener (Role Re-evaluation after Merge)
+### 6.3 Hazelcast 分区愈合监听器（合并后角色重新评估）
 
-When Hazelcast merges after a split-brain, the rejoining node restarts its Hazelcast instance. The existing role (set by keepalived) may be inconsistent with the post-merge cluster state. This listener triggers a re-check.
+Hazelcast 脑裂合并后，重新加入的节点会重启其 Hazelcast 实例。现有角色（由 keepalived 设置）可能与合并后的集群状态不一致。此监听器触发重新检查。
 
 ```java
 package com.hadhcp.ha;
@@ -630,9 +627,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 /**
- * Listens for Hazelcast lifecycle events and re-evaluates HA role after
- * a split-brain merge. After MERGED, this node's lease data has been
- * reconciled; the role should align with the current VIP state.
+ * 监听 Hazelcast 生命周期事件，在脑裂合并后重新评估 HA 角色。
+ * MERGED 之后，该节点的租约数据已调和；角色应与当前 VIP 状态对齐。
  */
 @Component
 public class HazelcastPartitionListener {
@@ -658,31 +654,31 @@ public class HazelcastPartitionListener {
 
     private void onLifecycleEvent(LifecycleEvent event) {
         if (event.getState() == LifecycleState.MERGED) {
-            log.info("Hazelcast split-brain merge complete — re-evaluating HA role");
+            log.info("Hazelcast 脑裂合并完成 —— 重新评估 HA 角色");
             reevaluateRole();
         } else if (event.getState() == LifecycleState.MERGE_FAILED) {
-            log.error("Hazelcast split-brain merge FAILED — forcing role to FAULT");
+            log.error("Hazelcast 脑裂合并失败 —— 强制角色设为 FAULT");
             haService.updateRole(HaRole.FAULT);
         }
     }
 
     /**
-     * After merge: if this node holds the VIP, it should become MASTER.
-     * If it does not, it should become STANDBY.
-     * Nodes already in FAULT/MAINTENANCE/STOP keep their current role.
+     * 合并后：如果该节点持有 VIP，应变为 MASTER。
+     * 如果不持有，应变为 STANDBY。
+     * 已在 FAULT/MAINTENANCE/STOP 状态的节点保持当前角色。
      */
     private void reevaluateRole() {
         HaRole current = haService.role();
         if (current == HaRole.FAULT
                 || current == HaRole.MAINTENANCE
                 || current == HaRole.STOP) {
-            log.info("Post-merge role re-evaluation skipped: node is in {} state", current);
+            log.info("合并后角色重新评估跳过：节点处于 {} 状态", current);
             return;
         }
         boolean hasVip = haService.hasVip();
         HaRole newRole = hasVip ? HaRole.MASTER : HaRole.STANDBY;
         if (newRole != current) {
-            log.info("Post-merge role transition: {} -> {} (hasVip={})", current, newRole, hasVip);
+            log.info("合并后角色转换：{} -> {}（hasVip={}）", current, newRole, hasVip);
             haService.updateRole(newRole);
         }
     }
@@ -691,9 +687,9 @@ public class HazelcastPartitionListener {
 
 ---
 
-### 6.4 Updated `HazelcastDhcpLeaseStore` — Handle `SplitBrainProtectionException`
+### 6.4 更新后的 `HazelcastDhcpLeaseStore` —— 处理 `SplitBrainProtectionException`
 
-When SBP is enabled and the cluster loses quorum, map operations throw `SplitBrainProtectionException`. The current `isAvailable()` check uses the member count check — but `put()` and `putIfAbsent()` may still throw if SBP is active. Wrap them defensively:
+启用 SBP 且集群失去定额时，map 操作会抛出 `SplitBrainProtectionException`。当前 `isAvailable()` 检查使用成员数检查 —— 但如果 SBP 激活，`put()` 和 `putIfAbsent()` 仍可能抛出。防御性地包装它们：
 
 ```java
 package com.hadhcp.dhcp.lease;
@@ -729,7 +725,7 @@ public class HazelcastDhcpLeaseStore implements DhcpLeaseStore {
         try {
             return Optional.ofNullable(leases.get(ipAddress));
         } catch (SplitBrainProtectionException e) {
-            log.warn("Split-brain protection active — read rejected for ip={}", ipAddress);
+            log.warn("脑裂保护激活 —— 读取被拒绝 ip={}", ipAddress);
             return Optional.empty();
         }
     }
@@ -741,7 +737,7 @@ public class HazelcastDhcpLeaseStore implements DhcpLeaseStore {
                     .filter(l -> l.macAddress().equalsIgnoreCase(macAddress))
                     .findFirst();
         } catch (SplitBrainProtectionException e) {
-            log.warn("Split-brain protection active — read rejected for mac={}", macAddress);
+            log.warn("脑裂保护激活 —— 读取被拒绝 mac={}", macAddress);
             return Optional.empty();
         }
     }
@@ -751,7 +747,7 @@ public class HazelcastDhcpLeaseStore implements DhcpLeaseStore {
         try {
             return leases.putIfAbsent(lease.ipAddress(), lease) == null;
         } catch (SplitBrainProtectionException e) {
-            log.warn("Split-brain protection active — putIfAbsent rejected for ip={}", lease.ipAddress());
+            log.warn("脑裂保护激活 —— putIfAbsent 被拒绝 ip={}", lease.ipAddress());
             return false;
         }
     }
@@ -761,7 +757,7 @@ public class HazelcastDhcpLeaseStore implements DhcpLeaseStore {
         try {
             leases.put(lease.ipAddress(), lease);
         } catch (SplitBrainProtectionException e) {
-            log.warn("Split-brain protection active — put rejected for ip={}", lease.ipAddress());
+            log.warn("脑裂保护激活 —— put 被拒绝 ip={}", lease.ipAddress());
         }
     }
 
@@ -770,7 +766,7 @@ public class HazelcastDhcpLeaseStore implements DhcpLeaseStore {
         try {
             return leases.values();
         } catch (SplitBrainProtectionException e) {
-            log.warn("Split-brain protection active — values() rejected");
+            log.warn("脑裂保护激活 —— values() 被拒绝");
             return java.util.Collections.emptyList();
         }
     }
@@ -792,44 +788,44 @@ public class HazelcastDhcpLeaseStore implements DhcpLeaseStore {
 
 ---
 
-### 6.5 `application.yml` Changes for Production 2-Node Deployment
+### 6.5 生产双节点部署的 `application.yml` 变更
 
 ```yaml
 ha:
-  vip: 192.168.56.200      # real VIP CIDR for production (was 127.0.0.1)
-  interface-name: eth0      # the NIC that carries the VIP
-  require-majority: true    # KEY CHANGE: was false
-  minimum-cluster-size: 2   # unchanged
+  vip: 192.168.56.200      # 生产环境真实 VIP CIDR（原 127.0.0.1）
+  interface-name: eth0      # 承载 VIP 的网卡
+  require-majority: true     # 关键变更：原 false
+  minimum-cluster-size: 2    # 不变
 
 cluster:
   name: ha-dhcp
   port: 5701
   members:
-    - 192.168.56.101:5701   # AC-1 physical IP
-    - 192.168.56.102:5701   # AC-2 physical IP
-    - 192.168.56.103:5701   # Witness node (if present); omit for pure 2-node
+    - 192.168.56.101:5701   # AC-1 物理 IP
+    - 192.168.56.102:5701   # AC-2 物理 IP
+    - 192.168.56.103:5701   # 见证节点（如有）；纯双节点则省略
 ```
 
-And add the role file path override if needed:
+如有需要，添加角色文件路径覆盖：
 ```yaml
 ha:
-  role-file: /run/ac-ha-role   # must match ROLE_FILE in notify.sh
+  role-file: /run/ac-ha-role   # 必须与 notify.sh 中的 ROLE_FILE 一致
 ```
 
 ---
 
-### 6.6 Witness Node Startup Script (`witness-start.sh`)
+### 6.6 见证节点启动脚本（`witness-start.sh`）
 
-Minimal standalone Hazelcast witness. Copy `hazelcast-5.5.0-slim.jar` to the witness machine and run:
+最小独立 Hazelcast 见证节点。将 `hazelcast-5.5.0-slim.jar` 复制到见证节点机器并运行：
 
 ```bash
 #!/usr/bin/env bash
-# witness-start.sh — run on the witness node
-# Requires: Java 21, hazelcast-5.5.0-slim.jar on classpath
+# witness-start.sh —— 在见证节点上运行
+# 需要：Java 21，classpath 上有 hazelcast-5.5.0-slim.jar
 set -euo pipefail
 
-AC1_IP="${1:?AC1_IP required}"
-AC2_IP="${2:?AC2_IP required}"
+AC1_IP="${1:?需要 AC1_IP}"
+AC2_IP="${2:?需要 AC2_IP}"
 CLUSTER_NAME="${3:-ha-dhcp}"
 PORT="${4:-5701}"
 
@@ -841,7 +837,7 @@ java -Xms64m -Xmx128m \
   com.hazelcast.core.server.HazelcastMemberStarter
 ```
 
-`/etc/hazelcast/witness.xml`:
+`/etc/hazelcast/witness.xml`：
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <hazelcast xmlns="http://www.hazelcast.com/schema/config"
@@ -862,7 +858,7 @@ java -Xms64m -Xmx128m \
         </join>
     </network>
 
-    <!-- Witness stores no data — all maps use minimal config -->
+    <!-- 见证节点不存储数据 —— 所有 map 使用最小配置 -->
     <map name="default">
         <backup-count>0</backup-count>
         <async-backup-count>0</async-backup-count>
@@ -870,309 +866,309 @@ java -Xms64m -Xmx128m \
     </map>
 
     <properties>
-        <!-- Faster member removal for process crashes -->
+        <!-- 进程崩溃时更快的成员移除 -->
         <property name="hazelcast.max.no.heartbeat.seconds">10</property>
         <property name="hazelcast.heartbeat.interval.seconds">1</property>
     </properties>
 </hazelcast>
 ```
 
-The same heartbeat tuning should be applied to AC-1 and AC-2's Hazelcast config for faster member failure detection:
+相同的心跳调优也应应用于 AC-1 和 AC-2 的 Hazelcast 配置，以实现更快的成员故障检测：
 
 ```java
-// In HazelcastConfiguration.java — add to config
+// 在 HazelcastConfiguration.java 中 —— 添加到 config
 config.setProperty("hazelcast.max.no.heartbeat.seconds", "10");
 config.setProperty("hazelcast.heartbeat.interval.seconds", "1");
 ```
 
 ---
 
-## 7. Verification Test Plan
+## 7. 验证测试计划
 
-### 7.1 Test Environment Setup
+### 7.1 测试环境搭建
 
 ```
-Physical / VM topology:
-  AC-1 (192.168.56.101): Spring Boot + Hazelcast + keepalived
-  AC-2 (192.168.56.102): Spring Boot + Hazelcast + keepalived
-  Witness (192.168.56.103): Hazelcast only (optional)
+物理 / VM 拓扑：
+  AC-1 (192.168.56.101)：Spring Boot + Hazelcast + keepalived
+  AC-2 (192.168.56.102)：Spring Boot + Hazelcast + keepalived
+  见证节点 (192.168.56.103)：仅 Hazelcast（可选）
   VIP: 192.168.56.200
-  Test client: 192.168.56.50 (sends DHCP requests, monitors responses)
-  Capture host: promiscuous mode on the same L2 segment
+  测试客户端: 192.168.56.50（发送 DHCP 请求，监控响应）
+  抓包主机: 同一 L2 段的混杂模式
 
-Helper aliases:
+辅助别名：
   alias kstatus='journalctl -u keepalived -n 20 --no-pager'
   alias hzstatus='curl -s http://VIP:8080/actuator/health | python3 -m json.tool'
 ```
 
 ---
 
-### 7.2 HA-01 — Normal Failover (AC-1 Process Crash)
+### 7.2 HA-01 — 正常故障转移（AC-1 进程崩溃）
 
-**Purpose**: Verify VIP drift and DHCP continuity when AC-1 crashes.
+**目的**：验证 AC-1 崩溃时 VIP 漂移和 DHCP 连续性。
 
 ```bash
-# Step 1: Verify initial state
-curl http://192.168.56.200:8080/actuator/health  # should return UP
-ip addr show eth0 | grep 192.168.56.200          # on AC-1: should show VIP
+# 步骤 1：验证初始状态
+curl http://192.168.56.200:8080/actuator/health  # 应返回 UP
+ip addr show eth0 | grep 192.168.56.200          # 在 AC-1 上：应显示 VIP
 
-# Step 2: Crash AC-1
+# 步骤 2：崩溃 AC-1
 ssh root@192.168.56.101 "systemctl stop ha-dhcp"
 ssh root@192.168.56.101 "systemctl stop keepalived"
 
-# Step 3: Monitor failover on AC-2
-watch -n1 'ip addr show eth0 | grep 56.200'    # VIP should appear within 15s
-journalctl -u keepalived -f                     # watch for MASTER transition
-curl http://192.168.56.200:8080/actuator/health # should return UP after ~15s
+# 步骤 3：在 AC-2 上监控故障转移
+watch -n1 'ip addr show eth0 | grep 56.200'    # VIP 应在 15s 内出现
+journalctl -u keepalived -f                     # 观察 MASTER 转换
+curl http://192.168.56.200:8080/actuator/health # ~15s 后应返回 UP
 
-# Step 4: Verify DHCP still works
-dhclient -v -r && dhclient -v eth0             # on test client: renew lease
+# 步骤 4：验证 DHCP 仍然工作
+dhclient -v -r && dhclient -v eth0             # 在测试客户端上：续租
 
-# Step 5: Verify no duplicate response
-tcpdump -i eth0 -n port 67 or port 68 &       # on capture host
-# Confirm only 1 OFFER per DISCOVER
+# 步骤 5：验证无重复响应
+tcpdump -i eth0 -n port 67 or port 68 &       # 在抓包主机上
+# 确认每个 DISCOVER 只有 1 个 OFFER
 
-# Expected: VIP on AC-2 within 10-15s, single DHCP responder
+# 预期：VIP 在 10-15s 内出现在 AC-2 上，单个 DHCP 响应者
 ```
 
-**Pass criteria**:
-- VIP visible on AC-2 `ip addr` within 15 seconds
-- `curl http://VIP:8080/actuator/health` returns `{"status":"UP"}` within 20 seconds
-- DHCP client receives exactly one OFFER for each DISCOVER
-- Option 54 (Server Identifier) in DHCP response = VIP (192.168.56.200)
+**通过标准**：
+- VIP 在 15 秒内出现在 AC-2 的 `ip addr` 上
+- `curl http://VIP:8080/actuator/health` 在 20 秒内返回 `{"status":"UP"}`
+- DHCP 客户端每个 DISCOVER 恰好收到一个 OFFER
+- DHCP 响应中选项 54（服务器标识符）= VIP (192.168.56.200)
 
 ---
 
-### 7.3 HA-02 — Network Partition Simulation
+### 7.3 HA-02 — 网络分区模拟
 
-**Purpose**: Verify split-brain protection when network between AC-1 and AC-2 is severed.
+**目的**：验证 AC-1 和 AC-2 之间网络断开时的脑裂防护。
 
 ```bash
-# Step 1: Verify initial state (both nodes healthy, VIP on AC-1)
+# 步骤 1：验证初始状态（两个节点健康，VIP 在 AC-1 上）
 curl http://192.168.56.200:8080/actuator/health
-# On both nodes:
+# 在两个节点上：
 curl http://192.168.56.101:8080/actuator/health
 curl http://192.168.56.102:8080/actuator/health
 
-# Step 2: Simulate partition using iptables (does NOT kill processes)
-# On AC-1: drop all packets to/from AC-2
+# 步骤 2：使用 iptables 模拟分区（不杀进程）
+# 在 AC-1 上：丢弃所有到/来自 AC-2 的包
 ssh root@192.168.56.101 "iptables -A INPUT -s 192.168.56.102 -j DROP && iptables -A OUTPUT -d 192.168.56.102 -j DROP"
-# On AC-2: drop all packets to/from AC-1
+# 在 AC-2 上：丢弃所有到/来自 AC-1 的包
 ssh root@192.168.56.102 "iptables -A INPUT -s 192.168.56.101 -j DROP && iptables -A OUTPUT -d 192.168.56.101 -j DROP"
-# If witness exists, also isolate one side from witness to test asymmetric partition
+# 如果有见证节点，也隔离一侧与见证节点以测试非对称分区
 
-# Step 3: Wait for partition detection (~5-10s for process crash path, up to 60s for network)
+# 步骤 3：等待分区检测（进程崩溃路径 ~5-10s，网络最多 60s）
 sleep 15
 
-# Step 4: Check each node independently
+# 步骤 4：独立检查每个节点
 ssh root@192.168.56.101 "curl -s http://127.0.0.1:8080/actuator/health"
 ssh root@192.168.56.102 "curl -s http://127.0.0.1:8080/actuator/health"
 
-# WITHOUT WITNESS + requireMajority=true: BOTH should show canServeDhcp=false
-# WITH WITNESS (AC-2+Witness have quorum): AC-2 should show canServeDhcp=true, AC-1=false
+# 无见证节点 + requireMajority=true：两边都应显示 canServeDhcp=false
+# 有见证节点（AC-2+见证节点有定额）：AC-2 应显示 canServeDhcp=true，AC-1=false
 
-# Step 5: Verify no dual DHCP response (capture on test client NIC)
+# 步骤 5：验证无双 DHCP 响应（在测试客户端网卡上抓包）
 tcpdump -i eth0 -n '(udp port 67 or udp port 68)'
-# Send a DHCP DISCOVER from test client
+# 从测试客户端发送 DHCP DISCOVER
 dhclient -v -r && dhclient -v --no-pid eth0
-# Count OFFER packets — must be exactly 0 (no witness, both stopped) or 1 (with witness)
+# 计数 OFFER 包 —— 必须恰好为 0（无见证节点，双方都停止）或 1（有见证节点）
 
-# Step 6: Heal partition
+# 步骤 6：愈合分区
 ssh root@192.168.56.101 "iptables -F"
 ssh root@192.168.56.102 "iptables -F"
 
-# Step 7: Verify recovery
+# 步骤 7：验证恢复
 sleep 15
-curl http://192.168.56.200:8080/actuator/health  # should return UP
+curl http://192.168.56.200:8080/actuator/health  # 应返回 UP
 ```
 
-**Pass criteria (Option A — no witness)**:
-- After partition: both nodes report `canServeDhcp=false` via health endpoint
-- DHCP clients receive 0 OFFER packets during partition
-- After partition heals: exactly one node serves DHCP
+**通过标准（选项 A —— 无见证节点）**：
+- 分区后：两个节点都通过健康端点报告 `canServeDhcp=false`
+- 分区期间 DHCP 客户端收到 0 个 OFFER 包
+- 分区愈合后：恰好一个节点提供 DHCP
 
-**Pass criteria (Option B — with witness)**:
-- AC-1 (isolated) reports `canServeDhcp=false`
-- AC-2 (majority side) reports `canServeDhcp=true`
-- DHCP clients receive exactly 1 OFFER
+**通过标准（选项 B —— 有见证节点）**：
+- AC-1（隔离）报告 `canServeDhcp=false`
+- AC-2（多数侧）报告 `canServeDhcp=true`
+- DHCP 客户端恰好收到 1 个 OFFER
 
 ---
 
-### 7.4 HA-03 — VIP Drift Detection
+### 7.4 HA-03 — VIP 漂移检测
 
-**Purpose**: Verify `hasVip()` correctly reflects the OS state, not a stale cache.
+**目的**：验证 `hasVip()` 正确反映 OS 状态，而不是缓存值。
 
 ```bash
-# Check VIP detection on each node
+# 检查每个节点上的 VIP 检测
 ssh root@192.168.56.101 'curl -s http://127.0.0.1:8080/actuator/health | python3 -m json.tool | grep -i vip'
 ssh root@192.168.56.102 'curl -s http://127.0.0.1:8080/actuator/health | python3 -m json.tool | grep -i vip'
 
-# Manually add VIP to AC-2 (simulating misconfiguration) while AC-1 has it
+# 在 AC-1 持有 VIP 时，手动给 AC-2 添加 VIP（模拟配置错误）
 ssh root@192.168.56.102 "ip addr add 192.168.56.200/24 dev eth0"
-# Within the health poll interval, AC-2 should detect hasVip=true
-# But role != MASTER, so canServeDhcp() should remain false on AC-2
+# 在健康轮询间隔内，AC-2 应检测到 hasVip=true
+# 但 role != MASTER，所以 AC-2 上 canServeDhcp() 应保持 false
 ssh root@192.168.56.102 'curl -s http://127.0.0.1:8080/actuator/health | python3 -m json.tool'
 
-# Cleanup
+# 清理
 ssh root@192.168.56.102 "ip addr del 192.168.56.200/24 dev eth0"
 
-# Pass: canServeDhcp=false on AC-2 even with VIP present, because role != MASTER
+# 通过：AC-2 即使持有 VIP，也因 role != MASTER 而 canServeDhcp=false
 ```
 
 ---
 
-### 7.5 HA-04 — Spring Boot Restart Role Recovery
+### 7.5 HA-04 — Spring Boot 重启角色恢复
 
-**Purpose**: Verify `RoleRecoveryBean` correctly restores role after a Spring Boot crash.
+**目的**：验证 `RoleRecoveryBean` 在 Spring Boot 崩溃后正确恢复角色。
 
 ```bash
-# Step 1: Ensure AC-1 is MASTER and role file exists
-ssh root@192.168.56.101 "cat /run/ac-ha-role"  # should print MASTER
+# 步骤 1：确保 AC-1 是 MASTER 且角色文件存在
+ssh root@192.168.56.101 "cat /run/ac-ha-role"  # 应打印 MASTER
 
-# Step 2: Kill Spring Boot (keep keepalived running)
+# 步骤 2：杀掉 Spring Boot（保持 keepalived 运行）
 ssh root@192.168.56.101 "systemctl stop ha-dhcp"
 
-# Step 3: keepalived on AC-2 detects failure → promotes to MASTER
-# Step 4: keepalived calls notify.sh MASTER → writes MASTER to /run/ac-ha-role on AC-2
-# Step 5: Restart Spring Boot on AC-1
+# 步骤 3：AC-2 上的 keepalived 检测到故障 → 提升为 MASTER
+# 步骤 4：keepalived 调用 notify.sh MASTER → 在 AC-2 上将 MASTER 写入 /run/ac-ha-role
+# 步骤 5：在 AC-1 上重启 Spring Boot
 ssh root@192.168.56.101 "systemctl start ha-dhcp"
 
-# Step 6: On AC-1, check that role was recovered from file (should be BACKUP/STANDBY)
-# keepalived state = BACKUP after AC-2 took over → role file should say BACKUP
-ssh root@192.168.56.101 "cat /run/ac-ha-role"  # should print BACKUP
+# 步骤 6：在 AC-1 上，检查角色是否从文件恢复（应为 BACKUP/STANDBY）
+# keepalived 状态 = AC-2 接管后的 BACKUP → 角色文件应说 BACKUP
+ssh root@192.168.56.101 "cat /run/ac-ha-role"  # 应打印 BACKUP
 ssh root@192.168.56.101 'curl -s http://127.0.0.1:8080/actuator/health | python3 -m json.tool | grep -i role'
 
-# Pass: AC-1 reports role=STANDBY after restart, not MASTER
+# 通过：AC-1 重启后报告 role=STANDBY，不是 MASTER
 ```
 
 ---
 
-### 7.6 HA-05 — Failover Timing Measurement
+### 7.6 HA-05 — 故障转移时间测量
 
-**Purpose**: Measure actual end-to-end failover time to establish SLA baseline.
+**目的**：测量实际端到端故障转移时间以建立 SLA 基线。
 
 ```bash
-# On capture host: monitor DHCP response availability
+# 在抓包主机上：监控 DHCP 响应可用性
 while true; do
     result=$(echo "" | timeout 3 dhcping -s 192.168.56.200 2>&1 || true)
     echo "$(date '+%H:%M:%S.%3N') $result"
     sleep 0.5
 done > /tmp/dhcp-availability.log &
 
-# On AC-1: crash the service
+# 在 AC-1 上：崩溃服务
 systemctl stop ha-dhcp && systemctl stop keepalived
 
-# Wait for recovery
+# 等待恢复
 sleep 30
 
-# Analyze gap in dhcp-availability.log
+# 分析 dhcp-availability.log 中的间隙
 grep -c "Got answer" /tmp/dhcp-availability.log
-# Find first "Got answer" after gap to calculate recovery time
+# 找到间隙后第一个 "Got answer" 以计算恢复时间
 ```
 
-**Target**: Recovery within 30 seconds. (Keepalived failover ~10s + Hazelcast detection ~10s + GARP propagation ~2s + DHCP client retry ~5s)
+**目标**：30 秒内恢复。（Keepalived 故障转移 ~10s + Hazelcast 检测 ~10s + GARP 传播 ~2s + DHCP 客户端重试 ~5s）
 
 ---
 
-### 7.7 HA-06 — Duplicate IP Allocation Under Concurrent Load
+### 7.7 HA-06 — 并发负载下重复 IP 分配
 
-**Purpose**: Verify no IP conflicts when both nodes briefly believe they are MASTER.
+**目的**：验证两个节点短暂都认为自己是 MASTER 时不会发生 IP 冲突。
 
 ```bash
-# This is the most critical correctness test
-# Requires: a custom DHCP client that can send bursts
+# 这是最关键的正确性测试
+# 需要：能够发送突发请求的自定义 DHCP 客户端
 
-# Setup: two clients, send simultaneous DISCOVERs during a failover event
-# Client A on segment 1, Client B on segment 2 (same L2)
+# 设置：两个客户端，在故障转移事件期间同时发送 DISCOVER
+# 客户端 A 在网段 1，客户端 B 在网段 2（同一 L2）
 
-# Step 1: Both clients request new leases simultaneously
-# Step 2: During the request, trigger a keepalived MASTER flip on AC-1
-# Step 3: Verify no two clients receive the same IP
+# 步骤 1：两个客户端同时请求新租约
+# 步骤 2：在请求期间，在 AC-1 上触发 keepalived MASTER 翻转
+# 步骤 3：验证没有两个客户端收到相同 IP
 
-# Simple check with dhclient (sequential, not ideal):
+# 用 dhclient 简单检查（顺序执行，不理想）：
 for i in $(seq 1 20); do
     ip=$(dhclient -v eth0 2>&1 | grep 'bound to' | awk '{print $3}')
-    echo "Client allocation: $ip"
+    echo "客户端分配: $ip"
 done
 
-# Cross-check: all allocated IPs should be unique
-# Also verify via Hazelcast: curl http://VIP:8080/internal/leases (if endpoint exists)
+# 交叉检查：所有分配的 IP 应唯一
+# 也可通过 Hazelcast 验证：curl http://VIP:8080/internal/leases（如果端点存在）
 ```
 
 ---
 
-## 8. Risk Assessment
+## 8. 风险评估
 
-### 8.1 Risk Matrix
+### 8.1 风险矩阵
 
-| # | Risk | Likelihood | Impact | Mitigation |
-|---|------|-----------|--------|------------|
-| R01 | Network partition causes dual-master (requireMajority=false) | **High** without fix | **Critical** — IP conflicts | Enable `require-majority: true` (§4.3) |
-| R02 | Hazelcast member detection delay (up to 60s default) | Medium | High — extended dual-master window | Tune heartbeat: `max.no.heartbeat.seconds=10` (§6.6) |
-| R03 | Spring Boot down during keepalived state change — role not updated | Medium | Medium — wrong role on restart | `RoleRecoveryBean` reads role file on startup (§6.1) |
-| R04 | VIP bound to both nodes simultaneously during partition | Medium | Critical — GARP confusion, ARP poisoning | requireMajority check gates DHCP response before VIP action |
-| R05 | Hazelcast split-brain merge loses lease records | Low | High — IP reuse after merge | `LatestUpdateMergePolicy` + H2 local mirror as backup (§5.4) |
-| R06 | Witness node failure reduces quorum headroom | Low | Low — falls back to Option A behavior | Monitor witness health; keep it simple (no business logic to fail) |
-| R07 | `check_app.sh` returns false negative (app healthy but check fails) | Low | Medium — spurious VIP failover | Tune `fall=3` in keepalived; ensure health endpoint is lightweight |
-| R08 | `nopreempt` causes VIP to stay on failed-then-recovered AC-2 | Low | Low — suboptimal but functional | Manually force VIP back via `systemctl restart keepalived` on AC-1 |
-| R09 | H2 file corruption during crash | Very Low | Medium — lease mirror lost; clients get new IPs | `WRITE_DELAY=0` in H2 JDBC URL; H2 has WAL, corruption is rare |
-| R10 | GARP not propagated (switch drops gratuitous ARP) | Very Low | High — VIP unreachable after failover | Increase `garp_master_repeat=5`; test in lab; use `arping` in notify.sh as backup |
+| # | 风险 | 可能性 | 影响 | 缓解措施 |
+|---|------|--------|------|----------|
+| R01 | 网络分区导致双主（requireMajority=false） | 未修复时 **高** | **严重** —— IP 冲突 | 启用 `require-majority: true`（§4.3） |
+| R02 | Hazelcast 成员检测延迟（默认最长 60s） | 中 | 高 —— 延长双主窗口 | 调优心跳：`max.no.heartbeat.seconds=10`（§6.6） |
+| R03 | keepalived 状态变更时 Spring Boot 宕机 —— 角色未更新 | 中 | 中 —— 重启后角色错误 | `RoleRecoveryBean` 启动时读取角色文件（§6.1） |
+| R04 | 分区期间 VIP 同时绑定到两个节点 | 中 | 严重 —— GARP 混乱，ARP 投毒 | requireMajority 检查在 VIP 操作之前限制 DHCP 响应 |
+| R05 | Hazelcast 脑裂合并丢失租约记录 | 低 | 高 —— 合并后 IP 重用 | `LatestUpdateMergePolicy` + H2 本地镜像作为备份（§5.4） |
+| R06 | 见证节点故障减少定额余量 | 低 | 低 —— 回退到选项 A 行为 | 监控见证节点健康；保持简单（无会失败的业务逻辑） |
+| R07 | `check_app.sh` 返回假阴性（应用健康但检查失败） | 低 | 中 —— 误报 VIP 故障转移 | keepalived 中调优 `fall=3`；确保健康端点是轻量的 |
+| R08 | `nopreempt` 导致 VIP 留在崩溃后恢复的 AC-2 上 | 低 | 低 —— 非最优但可工作 | 如需手动将 VIP 强制移回：在 AC-1 上 `systemctl restart keepalived` |
+| R09 | 崩溃时 H2 文件损坏 | 极低 | 中 —— 租约镜像丢失；客户端获得新 IP | H2 JDBC URL 中 `WRITE_DELAY=0`；H2 有 WAL，损坏很少见 |
+| R10 | GARP 未传播（交换机丢弃 gratuitous ARP） | 极低 | 高 —— 故障转移后 VIP 不可达 | 增加 `garp_master_repeat=5`；在实验室测试；在 notify.sh 中用 `arping` 作为备份 |
 
-### 8.2 Most Critical: R01 — Current `requireMajority=false`
+### 8.2 最关键：R01 —— 当前 `requireMajority=false`
 
-The current production configuration (`require-majority: false`) means a network partition between AC-1 and AC-2 will result in both nodes serving DHCP simultaneously. This is the highest-priority fix.
+当前生产配置（`require-majority: false`）意味着 AC-1 和 AC-2 之间的网络分区将导致两个节点同时提供 DHCP。这是最高优先级的修复。
 
-**Immediate action**: Change `require-majority: true` in `application.yml` before production deployment. The tradeoff (DHCP unavailable during partition) is acceptable — existing DHCP clients keep their leases and only new join attempts fail during the outage window.
+**立即行动**：在生产部署之前将 `require-majority: true` 变更到 `application.yml`。这个权衡（分区期间 DHCP 不可用）是可接受的 —— 现有 DHCP 客户端保持租约，只有新加入请求在停机窗口期间失败。
 
-### 8.3 Keepalived Unicast vs. Multicast
+### 8.3 Keepalived 单播 vs 组播
 
-The current config uses unicast (`unicast_src_ip`, `unicast_peer`). This is correct for environments where multicast is unreliable. However, unicast VRRP requires that both nodes know each other's IPs at config time. If physical IP changes, keepalived configs must be updated.
+当前配置使用单播（`unicast_src_ip`、`unicast_peer`）。在组播不可靠的环境中这是正确的。然而，单播 VRRP 要求两个节点在配置时就知道对方的 IP。如果物理 IP 变化，keepalived 配置必须更新。
 
-Ensure `TODO_AC1_IP`, `TODO_AC2_IP`, `TODO_VIP_CIDR`, and `TODO_INTERFACE` placeholders are replaced with real values in production.
+确保生产环境中的 `TODO_AC1_IP`、`TODO_AC2_IP`、`TODO_VIP_CIDR` 和 `TODO_INTERFACE` 占位符被替换为真实值。
 
-### 8.4 Health Check Precision
+### 8.4 健康检查精度
 
-`check_app.sh` falls back to `/actuator/health` if `/actuator/health/ha` is unavailable. The HA-specific health check is more precise because it includes `canServeDhcp` state. When the HA endpoint is implemented, set `ALLOW_BASIC_HEALTH_FALLBACK=false` to avoid promoting a node to MASTER that has a healthy JVM but is not actually ready to serve DHCP.
+`check_app.sh` 在 `/actuator/health/ha` 不可用时回退到 `/actuator/health`。HA 专用健康检查更精确，因为它包含 `canServeDhcp` 状态。当 HA 端点实现后，设置 `ALLOW_BASIC_HEALTH_FALLBACK=false` 以避免将 JVM 健康但尚未真正准备好提供 DHCP 的节点提升为 MASTER。
 
-### 8.5 Lease Continuity Through Failover
+### 8.5 故障转移中的租约连续性
 
-With `backupCount=1` in the Hazelcast map config, all leases are replicated to the backup node synchronously. When AC-1 fails, AC-2 has a full copy of all leases. No lease loss occurs for a clean node failure.
+Hazelcast map 配置中的 `backupCount=1` 意味着所有租约同步复制到备份节点。当 AC-1 故障时，AC-2 拥有所有租约的完整副本。对于干净的节点故障，不会发生租约丢失。
 
-During a split-brain (both nodes writing independently), the `LatestUpdateMergePolicy` will use the most recently updated entry post-merge. For DHCP, this means: the last RENEW/REBIND wins. Conflicts (same IP, different MAC) are possible in theory but require very specific timing. The H2 local mirror provides an additional audit trail.
+在脑裂期间（两个节点独立写入），`LatestUpdateMergePolicy` 将使用合并后最新更新的条目。对于 DHCP，这意味着：最后一次 RENEW/REBIND 获胜。理论上可能发生冲突（相同 IP，不同 MAC），但需要非常特定的时机。H2 本地镜像提供了额外的审计跟踪。
 
-### 8.6 `nopreempt` Implications
+### 8.6 `nopreempt` 的含义
 
-With `nopreempt`, after AC-1 recovers from a crash, AC-2 keeps the VIP. AC-1 returns as STANDBY. This prevents unnecessary VIP churn but means:
-- The "original" primary (priority=110) is not automatically restored
-- Over time, after multiple failovers, you lose track of which node "should" be primary
-- Manual VIP re-balancing is needed if desired: `systemctl restart keepalived` on AC-2 will trigger a new election
+使用 `nopreempt`，AC-1 从崩溃中恢复后，AC-2 保持 VIP。AC-1 作为 STANDBY 返回。这防止了不必要的 VIP 抖动，但意味着：
+- "原始"主节点（priority=110）不会自动恢复
+- 多次故障转移后，你会丢失哪个节点"应该"是主节点的记录
+- 如需手动重新平衡 VIP：`systemctl restart keepalived` on AC-2 会触发新的选举
 
-This is intentional and correct behavior for DHCP HA. VIP flapping is more harmful than leaving VIP on the backup.
+这是 DHCP HA 的预期且正确行为。VIP 抖动比让 VIP 留在备份节点上更有害。
 
 ---
 
-## 9. Summary and Action Items
+## 9. 总结与行动项
 
-### Immediate (before production go-live)
+### 立即执行（生产上线前）
 
-| Priority | Action | File | Change |
-|----------|--------|------|--------|
-| P0 | Enable `require-majority` | `application.yml` | `require-majority: false` → `true` |
-| P0 | Set real VIP and interface | `application.yml` | `vip: 127.0.0.1` → real VIP; set `interface-name` |
-| P0 | Fill keepalived TODO placeholders | `keepalived-ac1.conf`, `keepalived-ac2.conf` | Replace all `TODO_*` values |
-| P0 | Configure TCP-IP cluster members | `application.yml` | `members: []` → real AC IPs |
-| P1 | Add `RoleRecoveryBean` | New file | §6.1 |
-| P1 | Add SBP to `HazelcastConfiguration` | `HazelcastConfiguration.java` | §6.2 |
-| P1 | Wrap SBP exceptions in lease store | `HazelcastDhcpLeaseStore.java` | §6.4 |
-| P1 | Add `HazelcastPartitionListener` | New file | §6.3 |
-| P1 | Tune Hazelcast heartbeat timeouts | `HazelcastConfiguration.java` | `max.no.heartbeat.seconds=10` |
-| P2 | Deploy witness node | New deployment | §6.6 |
-| P2 | Run HA-01 through HA-05 test scenarios | Test environment | §7 |
+| 优先级 | 行动 | 文件 | 变更 |
+|--------|------|------|------|
+| P0 | 启用 `require-majority` | `application.yml` | `require-majority: false` → `true` |
+| P0 | 设置真实 VIP 和网卡 | `application.yml` | `vip: 127.0.0.1` → 真实 VIP；设置 `interface-name` |
+| P0 | 填写 keepalived TODO 占位符 | `keepalived-ac1.conf`、`keepalived-ac2.conf` | 替换所有 `TODO_*` 值 |
+| P0 | 配置 TCP-IP 集群成员 | `application.yml` | `members: []` → 真实 AC IP |
+| P1 | 添加 `RoleRecoveryBean` | 新文件 | §6.1 |
+| P1 | 在 `HazelcastConfiguration` 中添加 SBP | `HazelcastConfiguration.java` | §6.2 |
+| P1 | 在租约存储中包装 SBP 异常 | `HazelcastDhcpLeaseStore.java` | §6.4 |
+| P1 | 添加 `HazelcastPartitionListener` | 新文件 | §6.3 |
+| P1 | 调优 Hazelcast 心跳超时 | `HazelcastConfiguration.java` | `max.no.heartbeat.seconds=10` |
+| P2 | 部署见证节点 | 新部署 | §6.6 |
+| P2 | 运行 HA-01 到 HA-05 测试场景 | 测试环境 | §7 |
 
-### Architecture Decision Record
+### 架构决策记录
 
-**Chosen**: Option B (keepalived VRRP + requireMajority=true + lightweight witness)
+**选定**：选项 B（keepalived VRRP + requireMajority=true + 轻量见证节点）
 
-**Rationale**: The witness node eliminates the availability tradeoff of Option A while maintaining strict split-brain safety. The witness is operationally simple (stateless, no application logic) and inexpensive to host. The combination of keepalived (VIP management) and Hazelcast SBP (write protection) provides defense-in-depth: even if keepalived incorrectly binds VIP to both nodes, the majority check prevents dual DHCP service.
+**理由**：见证节点消除了选项 A 的可用性权衡，同时保持严格的脑裂安全。见证节点运维简单（无状态，无应用逻辑）且托管成本低。keepalived（VIP 管理）和 Hazelcast SBP（写入保护）的组合提供了纵深防御：即使 keepalived 错误地将 VIP 绑定到两个节点，定额检查也能阻止双 DHCP 服务。
 
-**Fallback**: If a 3rd machine is unavailable, Option A (requireMajority=true, no witness) is safe. DHCP outage during network partition is acceptable given that existing clients retain leases.
+**备选**：如果没有第 3 台机器，选项 A（requireMajority=true，无见证节点）是安全的。网络分区期间的 DHCP 停机是可接受的，因为现有客户端保留租约。
