@@ -9,9 +9,18 @@ import com.hazelcast.core.HazelcastInstance;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
+/**
+ * Creates the embedded Hazelcast member used for lease, edge device, and config synchronization.
+ */
 @Configuration
 public class HazelcastConfiguration {
 
+    /**
+     * Builds the Hazelcast instance and its HA maps from cluster properties.
+     *
+     * @param properties cluster name, port, and member discovery settings
+     * @return configured Hazelcast instance
+     */
     @Bean(destroyMethod = "shutdown")
     public HazelcastInstance hazelcastInstance(ClusterProperties properties) {
         Config config = new Config();

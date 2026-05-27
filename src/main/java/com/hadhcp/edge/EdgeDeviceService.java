@@ -25,6 +25,9 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 import org.springframework.web.server.ResponseStatusException;
 
+/**
+ * Manages edge device SN-to-IP mappings and reconciles them through Hazelcast after recovery.
+ */
 @Service
 public class EdgeDeviceService {
 
@@ -36,6 +39,13 @@ public class EdgeDeviceService {
     private final IMap<String, String> devices;
     private final Clock clock;
 
+    /**
+     * Creates the edge device service around the local repository and Hazelcast map.
+     *
+     * @param repository local H2 edge device mirror
+     * @param haService HA role service used to gate writes
+     * @param hazelcastInstance Hazelcast member that stores the shared view
+     */
     public EdgeDeviceService(
             EdgeDeviceRepository repository,
             HaService haService,
@@ -48,6 +58,9 @@ public class EdgeDeviceService {
         this.clock = Clock.systemUTC();
     }
 
+    /**
+     * Publishes the local edge device mirror into Hazelcast on application startup.
+     */
     @EventListener(ApplicationReadyEvent.class)
     @Transactional
     public void loadMirrorIntoHazelcast() {
@@ -60,6 +73,11 @@ public class EdgeDeviceService {
         log.info("Edge device mirror loaded into Hazelcast: published={} localRows={}", published, repository.count());
     }
 
+    /**
+     * Lists all local edge device mappings.
+     *
+     * @return sorted edge device responses
+     */
     @Transactional(readOnly = true)
     public List<EdgeDeviceResponse> findAll() {
         return repository.findAll().stream()
@@ -68,11 +86,24 @@ public class EdgeDeviceService {
                 .toList();
     }
 
+    /**
+     * Finds a local edge device mapping by serial number.
+     *
+     * @param sn raw serial number
+     * @return matching edge device response when present
+     */
     @Transactional(readOnly = true)
     public Optional<EdgeDeviceResponse> findBySn(String sn) {
         return repository.findById(normalizeSn(sn)).map(this::toResponse);
     }
 
+    /**
+     * Creates or updates an edge device mapping on the VIP holder.
+     *
+     * @param sn raw serial number
+     * @param request requested IP mapping
+     * @return saved edge device response
+     */
     @Transactional
     public EdgeDeviceResponse upsert(String sn, EdgeDeviceUpdateRequest request) {
         if (!haService.hasVip()) {
@@ -96,6 +127,9 @@ public class EdgeDeviceService {
         return toResponse(saved);
     }
 
+    /**
+     * Reconciles edge device mappings after a partition heals.
+     */
     @Scheduled(fixedDelayString = "${edge.device-sync-ms:2000}")
     @Transactional
     public void syncRecoveredDevices() {
@@ -110,6 +144,9 @@ public class EdgeDeviceService {
         }
     }
 
+    /**
+     * Keeps VIP-holder mappings first and supplements non-conflicting remote SN/IP pairs.
+     */
     private void mergeAsVipHolder() {
         Map<String, String> finalView = new LinkedHashMap<>();
         Map<String, String> usedIps = new LinkedHashMap<>();
@@ -138,6 +175,9 @@ public class EdgeDeviceService {
         devices.putAll(finalView);
     }
 
+    /**
+     * Replaces the local mirror with the current Hazelcast view on backup nodes.
+     */
     private void replaceLocalMirrorFromHazelcast() {
         Map<String, String> finalView = new LinkedHashMap<>();
         List<Map.Entry<String, String>> remoteEntries = new ArrayList<>(devices.entrySet());
@@ -154,6 +194,9 @@ public class EdgeDeviceService {
         finalView.forEach(this::saveLocal);
     }
 
+    /**
+     * Rejects an update when the requested IP is already owned by another SN.
+     */
     private void rejectDuplicateIp(String serialNumber, String ipAddress) {
         repository.findByIpAddress(ipAddress)
                 .filter(existing -> !existing.getSerialNumber().equals(serialNumber))
@@ -175,6 +218,9 @@ public class EdgeDeviceService {
                 });
     }
 
+    /**
+     * Persists a local edge device mapping.
+     */
     private EdgeDeviceEntity saveLocal(String serialNumber, String ipAddress) {
         Instant now = clock.instant();
         EdgeDeviceEntity entity = repository.findById(serialNumber).orElseGet(() -> {
@@ -188,6 +234,9 @@ public class EdgeDeviceService {
         return repository.save(entity);
     }
 
+    /**
+     * Converts a persistence row into the API response shape.
+     */
     private EdgeDeviceResponse toResponse(EdgeDeviceEntity entity) {
         return new EdgeDeviceResponse(
                 entity.getSerialNumber(),
@@ -197,6 +246,9 @@ public class EdgeDeviceService {
         );
     }
 
+    /**
+     * Normalizes and validates edge device serial numbers.
+     */
     private String normalizeSn(String sn) {
         if (!StringUtils.hasText(sn)) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Edge device SN is required");
@@ -208,6 +260,9 @@ public class EdgeDeviceService {
         return normalized;
     }
 
+    /**
+     * Normalizes and validates edge device IPv4 addresses.
+     */
     private String normalizeIp(String ip) {
         if (!StringUtils.hasText(ip)) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Edge device IP is required");
@@ -221,6 +276,9 @@ public class EdgeDeviceService {
         }
     }
 
+    /**
+     * Returns the currently visible Hazelcast member count.
+     */
     private int memberCount() {
         try {
             return hazelcastInstance.getCluster().getMembers().size();

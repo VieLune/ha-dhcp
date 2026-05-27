@@ -28,6 +28,9 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+/**
+ * Allocates, persists, expires, and reconciles DHCP leases across the local mirror and Hazelcast authority.
+ */
 @Service
 public class DhcpLeaseService {
 
@@ -41,6 +44,15 @@ public class DhcpLeaseService {
     private final Clock clock;
     private final String ownerNodeId;
 
+    /**
+     * Creates the DHCP lease service around the configured pool and shared lease store.
+     *
+     * @param properties DHCP runtime properties
+     * @param store Hazelcast-backed lease authority
+     * @param repository local H2 lease mirror
+     * @param mapper mapper between database rows and distributed records
+     * @param haService HA gate and readiness state
+     */
     public DhcpLeaseService(
             DhcpProperties properties,
             DhcpLeaseStore store,
@@ -57,6 +69,9 @@ public class DhcpLeaseService {
         this.ownerNodeId = resolveOwnerNodeId();
     }
 
+    /**
+     * Loads the local lease mirror into Hazelcast when the application starts.
+     */
     @EventListener(ApplicationReadyEvent.class)
     @Transactional
     public void loadMirrorIntoAuthority() {
@@ -75,6 +90,12 @@ public class DhcpLeaseService {
         log.info("DHCP lease mirror loaded into authority: merged={} localRows={}", merged, repository.count());
     }
 
+    /**
+     * Creates or reuses an OFFER lease for the supplied client MAC address.
+     *
+     * @param macAddress raw client MAC address
+     * @return offered lease, or empty when no address can be allocated
+     */
     @Transactional
     public Optional<DhcpLeaseRecord> offerLease(String macAddress) {
         String mac = MacAddresses.normalize(macAddress);
@@ -112,6 +133,13 @@ public class DhcpLeaseService {
         return Optional.empty();
     }
 
+    /**
+     * Converts an offered or requested address into an ACTIVE lease.
+     *
+     * @param macAddress raw client MAC address
+     * @param requestedIp optional address requested by the client
+     * @return active lease, or empty when the request conflicts with authority state
+     */
     @Transactional
     public Optional<DhcpLeaseRecord> acknowledgeLease(String macAddress, Optional<String> requestedIp) {
         String mac = MacAddresses.normalize(macAddress);
@@ -140,16 +168,29 @@ public class DhcpLeaseService {
         return occupyCandidate(mac, requested, LeaseState.ACTIVE, now);
     }
 
+    /**
+     * Marks the client's current lease as released.
+     *
+     * @param macAddress raw client MAC address
+     */
     @Transactional
     public void releaseLease(String macAddress) {
         transitionMacLease(macAddress, LeaseState.RELEASED);
     }
 
+    /**
+     * Marks the client's current lease as declined.
+     *
+     * @param macAddress raw client MAC address
+     */
     @Transactional
     public void declineLease(String macAddress) {
         transitionMacLease(macAddress, LeaseState.DECLINED);
     }
 
+    /**
+     * Expires active and offered leases whose lease time has elapsed.
+     */
     @Scheduled(fixedDelayString = "${dhcp.expiration-scan-ms:60000}")
     @Transactional
     public void expireLeases() {
@@ -168,6 +209,9 @@ public class DhcpLeaseService {
         }
     }
 
+    /**
+     * Reconciles lease state after a partition heals, either as VIP holder or follower.
+     */
     @Scheduled(fixedDelayString = "${dhcp.recovery-sync-ms:2000}")
     @Transactional
     public void syncRecoveredLeases() {
@@ -182,6 +226,9 @@ public class DhcpLeaseService {
         }
     }
 
+    /**
+     * Builds the authoritative lease view from the VIP holder's H2 mirror and non-conflicting remote records.
+     */
     private void mergeAsVipHolder() {
         Map<String, DhcpLeaseRecord> finalByIp = new LinkedHashMap<>();
         Set<String> usedMacs = new HashSet<>();
@@ -209,6 +256,9 @@ public class DhcpLeaseService {
         store.replaceAll(finalByIp.values());
     }
 
+    /**
+     * Replaces this node's local mirror with the authoritative Hazelcast lease view.
+     */
     private void replaceLocalMirrorFromAuthority() {
         Map<String, DhcpLeaseRecord> finalByIp = new LinkedHashMap<>();
         Set<String> usedMacs = new HashSet<>();
@@ -224,16 +274,37 @@ public class DhcpLeaseService {
         finalByIp.values().forEach(record -> repository.save(mapper.toEntity(record)));
     }
 
+    /**
+     * Returns stable, IP-sorted values from the distributed lease store.
+     *
+     * @return sorted lease records
+     */
     private List<DhcpLeaseRecord> sortedStoreValues() {
         List<DhcpLeaseRecord> values = new ArrayList<>(store.values());
         values.sort(Comparator.comparing(DhcpLeaseRecord::ipAddress));
         return values;
     }
 
+    /**
+     * Finds an unexpired ACTIVE or OFFERED lease for the client MAC.
+     *
+     * @param mac normalized MAC address
+     * @param now current instant
+     * @return reusable lease when present
+     */
     private Optional<DhcpLeaseRecord> findReusableLeaseByMac(String mac, Instant now) {
         return store.findByMac(mac).filter(lease -> lease.isUsableFor(mac, now));
     }
 
+    /**
+     * Reserves a candidate address if the authority does not contain a conflicting live lease.
+     *
+     * @param mac normalized MAC address
+     * @param ipAddress candidate IPv4 address
+     * @param state requested lease state
+     * @param now current instant
+     * @return created or updated lease when the candidate is available
+     */
     private Optional<DhcpLeaseRecord> occupyCandidate(String mac, String ipAddress, LeaseState state, Instant now) {
         Optional<DhcpLeaseRecord> existing = store.findByIp(ipAddress);
         if (existing.isPresent()) {
@@ -255,6 +326,9 @@ public class DhcpLeaseService {
         return Optional.of(created);
     }
 
+    /**
+     * Creates a new immutable lease record for the current node.
+     */
     private DhcpLeaseRecord newRecord(
             String ipAddress,
             String mac,
@@ -278,6 +352,12 @@ public class DhcpLeaseService {
         );
     }
 
+    /**
+     * Transitions the current lease for a client MAC into a terminal state.
+     *
+     * @param macAddress raw client MAC address
+     * @param nextState target lease state
+     */
     private void transitionMacLease(String macAddress, LeaseState nextState) {
         String mac = MacAddresses.normalize(macAddress);
         Instant now = clock.instant();
@@ -288,11 +368,17 @@ public class DhcpLeaseService {
         });
     }
 
+    /**
+     * Checks whether a dynamic address can be allocated to the MAC.
+     */
     private boolean isDynamicCandidateAllowed(String ipAddress, String mac) {
         return !excludedAddresses().contains(ipAddress)
                 && !reservedIpsForOtherMacs(mac).contains(ipAddress);
     }
 
+    /**
+     * Checks whether the requested address is valid for the MAC and current pool rules.
+     */
     private boolean isAddressAllowedForMac(String ipAddress, String mac) {
         Optional<String> reservation = reservedIp(mac);
         if (reservation.isPresent()) {
@@ -304,6 +390,9 @@ public class DhcpLeaseService {
         return candidate >= start && candidate <= end && isDynamicCandidateAllowed(ipAddress, mac);
     }
 
+    /**
+     * Finds the reserved IP for the normalized MAC, if configured.
+     */
     private Optional<String> reservedIp(String mac) {
         return normalizedReservations().entrySet().stream()
                 .filter(entry -> entry.getKey().equalsIgnoreCase(mac))
@@ -311,12 +400,18 @@ public class DhcpLeaseService {
                 .findFirst();
     }
 
+    /**
+     * Returns reservations with normalized MAC keys.
+     */
     private Map<String, String> normalizedReservations() {
         Map<String, String> reservations = new HashMap<>();
         properties.getReservations().forEach((mac, ip) -> reservations.put(MacAddresses.normalize(mac), ip));
         return reservations;
     }
 
+    /**
+     * Returns reserved IPs that belong to other MAC addresses.
+     */
     private Set<String> reservedIpsForOtherMacs(String mac) {
         Set<String> reserved = new HashSet<>();
         normalizedReservations().forEach((reservedMac, ip) -> {
@@ -327,10 +422,16 @@ public class DhcpLeaseService {
         return reserved;
     }
 
+    /**
+     * Returns the configured excluded address set.
+     */
     private Set<String> excludedAddresses() {
         return new HashSet<>(properties.getExcludedAddresses());
     }
 
+    /**
+     * Compares lease update timestamps.
+     */
     private boolean isNewer(DhcpLeaseRecord left, DhcpLeaseRecord right) {
         if (left.updatedAt() == null) {
             return false;
@@ -338,6 +439,9 @@ public class DhcpLeaseService {
         return right.updatedAt() == null || left.updatedAt().isAfter(right.updatedAt());
     }
 
+    /**
+     * Writes a lease record to the local mirror while preserving MAC uniqueness.
+     */
     private void saveMirror(DhcpLeaseRecord record) {
         repository.findByMacAddressIgnoreCase(record.macAddress())
                 .filter(existing -> !existing.getIpAddress().equals(record.ipAddress()))
@@ -348,6 +452,9 @@ public class DhcpLeaseService {
         repository.save(mapper.toEntity(record));
     }
 
+    /**
+     * Resolves the local node identifier used in distributed lease records.
+     */
     private String resolveOwnerNodeId() {
         String configured = System.getenv("AC_NODE_ID");
         if (configured != null && !configured.isBlank()) {

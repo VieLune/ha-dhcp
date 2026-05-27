@@ -26,6 +26,9 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 import org.springframework.web.server.ResponseStatusException;
 
+/**
+ * Stores, applies, publishes, and recovers the effective AC runtime configuration.
+ */
 @Service
 public class AcConfigService implements SmartInitializingSingleton {
 
@@ -41,6 +44,16 @@ public class AcConfigService implements SmartInitializingSingleton {
     private final HazelcastInstance hazelcastInstance;
     private final IMap<String, String> configs;
 
+    /**
+     * Creates the AC config service around runtime properties, H2 storage, and Hazelcast publication.
+     *
+     * @param dhcpProperties mutable DHCP runtime properties
+     * @param haProperties mutable HA runtime properties
+     * @param repository local H2 config mirror
+     * @param objectMapper JSON mapper for persisted config
+     * @param haService HA role service used to gate writes
+     * @param hazelcastInstance Hazelcast member that stores the effective config view
+     */
     public AcConfigService(
             DhcpProperties dhcpProperties,
             HaProperties haProperties,
@@ -58,16 +71,30 @@ public class AcConfigService implements SmartInitializingSingleton {
         this.configs = hazelcastInstance.getMap("ac:config");
     }
 
+    /**
+     * Loads the effective configuration once Spring has created every singleton bean.
+     */
     @Override
     public void afterSingletonsInstantiated() {
         loadEffectiveConfig();
     }
 
+    /**
+     * Returns a snapshot of the current runtime configuration.
+     *
+     * @return current effective AC configuration
+     */
     @Transactional(readOnly = true)
     public AcRuntimeConfig current() {
         return snapshot();
     }
 
+    /**
+     * Replaces the effective AC configuration on the VIP holder.
+     *
+     * @param request requested full replacement config
+     * @return normalized and applied configuration
+     */
     @Transactional
     public AcRuntimeConfig update(AcRuntimeConfig request) {
         if (!haService.hasVip()) {
@@ -81,6 +108,9 @@ public class AcConfigService implements SmartInitializingSingleton {
         return normalized;
     }
 
+    /**
+     * Reconciles effective config after recovery, publishing from the VIP holder and applying on backups.
+     */
     @Scheduled(fixedDelayString = "${ac.config-sync-ms:2000}")
     @Transactional
     public void syncRecoveredConfig() {
@@ -103,6 +133,9 @@ public class AcConfigService implements SmartInitializingSingleton {
         apply(normalized);
     }
 
+    /**
+     * Loads config from H2 or application properties, applies it locally, and publishes it to Hazelcast.
+     */
     private void loadEffectiveConfig() {
         AcRuntimeConfig effective = repository.findById(EFFECTIVE_KEY)
                 .map(AcConfigEntity::getConfigJson)
@@ -115,6 +148,9 @@ public class AcConfigService implements SmartInitializingSingleton {
         log.info("AC config loaded: source={}", repository.existsById(EFFECTIVE_KEY) ? "database" : "application.yml");
     }
 
+    /**
+     * Builds an immutable config snapshot from mutable runtime properties.
+     */
     private AcRuntimeConfig snapshot() {
         DhcpProperties.Pool pool = dhcpProperties.getPool();
         return new AcRuntimeConfig(
@@ -143,6 +179,9 @@ public class AcConfigService implements SmartInitializingSingleton {
         );
     }
 
+    /**
+     * Applies a normalized config to mutable runtime properties.
+     */
     private void apply(AcRuntimeConfig config) {
         AcRuntimeConfig.Dhcp dhcp = config.dhcp();
         dhcpProperties.setEnabled(dhcp.enabled());
@@ -167,6 +206,9 @@ public class AcConfigService implements SmartInitializingSingleton {
         haProperties.setCommandTimeoutSeconds(config.ha().commandTimeoutSeconds());
     }
 
+    /**
+     * Validates and normalizes a full AC runtime config.
+     */
     private AcRuntimeConfig normalize(AcRuntimeConfig config) {
         if (config == null || config.dhcp() == null || config.ha() == null || config.dhcp().pool() == null) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "AC config must include dhcp, dhcp.pool and ha");
@@ -231,6 +273,9 @@ public class AcConfigService implements SmartInitializingSingleton {
         );
     }
 
+    /**
+     * Persists the effective config JSON to the local H2 mirror.
+     */
     private void save(AcRuntimeConfig config) {
         Instant now = Instant.now();
         AcConfigEntity entity = repository.findById(EFFECTIVE_KEY).orElseGet(() -> {
@@ -244,6 +289,9 @@ public class AcConfigService implements SmartInitializingSingleton {
         repository.save(entity);
     }
 
+    /**
+     * Publishes the effective config JSON to Hazelcast.
+     */
     private void publish(AcRuntimeConfig config) {
         try {
             configs.put(EFFECTIVE_KEY, write(config));
@@ -252,6 +300,9 @@ public class AcConfigService implements SmartInitializingSingleton {
         }
     }
 
+    /**
+     * Parses a persisted config JSON document.
+     */
     private AcRuntimeConfig read(String json) {
         try {
             return objectMapper.readValue(json, AcRuntimeConfig.class);
@@ -260,6 +311,9 @@ public class AcConfigService implements SmartInitializingSingleton {
         }
     }
 
+    /**
+     * Serializes a config object into JSON.
+     */
     private String write(AcRuntimeConfig config) {
         try {
             return objectMapper.writeValueAsString(config);
@@ -268,6 +322,9 @@ public class AcConfigService implements SmartInitializingSingleton {
         }
     }
 
+    /**
+     * Returns the currently visible Hazelcast member count.
+     */
     private int memberCount() {
         try {
             return hazelcastInstance.getCluster().getMembers().size();
@@ -276,6 +333,9 @@ public class AcConfigService implements SmartInitializingSingleton {
         }
     }
 
+    /**
+     * Requires a non-empty valid IPv4 address.
+     */
     private String requireIpv4(String value, String field) {
         String normalized = trimToNull(value);
         if (normalized == null) {
@@ -289,6 +349,9 @@ public class AcConfigService implements SmartInitializingSingleton {
         }
     }
 
+    /**
+     * Normalizes an optional IPv4 address when supplied.
+     */
     private String normalizeOptionalIp(String value, String field) {
         String normalized = trimToNull(value);
         if (normalized == null) {
@@ -297,12 +360,18 @@ public class AcConfigService implements SmartInitializingSingleton {
         return requireIpv4(normalized, field);
     }
 
+    /**
+     * Requires a TCP/UDP port value in the valid range.
+     */
     private void requirePort(int port, String field) {
         if (port < 1 || port > 65535) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, field + " must be between 1 and 65535");
         }
     }
 
+    /**
+     * Normalizes a list of IPv4 values.
+     */
     private List<String> normalizeIpList(List<String> values, String field) {
         List<String> normalized = new ArrayList<>();
         if (values == null) {
@@ -314,6 +383,9 @@ public class AcConfigService implements SmartInitializingSingleton {
         return normalized;
     }
 
+    /**
+     * Normalizes reservation MAC keys and IPv4 values.
+     */
     private Map<String, String> normalizeReservations(Map<String, String> reservations) {
         Map<String, String> normalized = new LinkedHashMap<>();
         if (reservations == null) {
@@ -323,6 +395,9 @@ public class AcConfigService implements SmartInitializingSingleton {
         return normalized;
     }
 
+    /**
+     * Checks whether an IPv4 address falls within a pool range.
+     */
     private boolean isInPool(String ip, String poolStart, String poolEnd) {
         long value = Integer.toUnsignedLong(Ipv4Addresses.toInt(ip));
         long start = Integer.toUnsignedLong(Ipv4Addresses.toInt(poolStart));
@@ -330,6 +405,9 @@ public class AcConfigService implements SmartInitializingSingleton {
         return value >= start && value <= end;
     }
 
+    /**
+     * Converts blank strings to null and trims non-blank strings.
+     */
     private String trimToNull(String value) {
         if (!StringUtils.hasText(value)) {
             return null;
