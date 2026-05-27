@@ -5,5 +5,6 @@ public enum LeaseState {
     ACTIVE,
     EXPIRED,
     RELEASED,
-    DECLINED
+    DECLINED,
+    ABANDONED
 }

@@ -22,14 +22,25 @@ public class HazelcastConfiguration {
         network.setPortAutoIncrement(true);
 
         JoinConfig join = network.getJoin();
-        join.getMulticastConfig().setEnabled(properties.getMembers().isEmpty());
-        join.getTcpIpConfig().setEnabled(!properties.getMembers().isEmpty());
+        boolean useTcpIp = !properties.getMembers().isEmpty();
+        join.getMulticastConfig().setEnabled(!useTcpIp);
+        join.getTcpIpConfig().setEnabled(useTcpIp);
         properties.getMembers().forEach(join.getTcpIpConfig()::addMember);
 
         MapConfig leases = new MapConfig("dhcp:leases");
         leases.setBackupCount(1);
         leases.setAsyncBackupCount(0);
         config.addMapConfig(leases);
+
+        MapConfig edgeDevices = new MapConfig("edge:devices");
+        edgeDevices.setBackupCount(1);
+        edgeDevices.setAsyncBackupCount(0);
+        config.addMapConfig(edgeDevices);
+
+        MapConfig acConfig = new MapConfig("ac:config");
+        acConfig.setBackupCount(1);
+        acConfig.setAsyncBackupCount(0);
+        config.addMapConfig(acConfig);
 
         return Hazelcast.newHazelcastInstance(config);
     }

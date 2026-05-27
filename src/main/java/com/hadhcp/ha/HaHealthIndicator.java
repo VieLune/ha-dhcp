@@ -20,8 +20,10 @@ public class HaHealthIndicator implements HealthIndicator {
         return builder
                 .withDetail("role", status.role())
                 .withDetail("dhcpEnabled", status.dhcpEnabled())
+                .withDetail("vipAddress", status.vipAddress())
                 .withDetail("hasVip", status.hasVip())
                 .withDetail("leaseMirrorLoaded", status.leaseMirrorLoaded())
+                .withDetail("configLoaded", status.configLoaded())
                 .withDetail("leaseAuthorityAvailable", status.leaseAuthorityAvailable())
                 .withDetail("leaseAuthorityMembers", status.leaseAuthorityMembers())
                 .withDetail("canServeDhcp", status.canServeDhcp())

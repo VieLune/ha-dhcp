@@ -44,12 +44,16 @@ dhcp:
     end: 192.168.56.200
 
 ha:
-  vip: 127.0.0.1
+  # If empty, the application resolves the first physical NIC IPv4 on Ubuntu.
+  ip:
   interface-name:
-  require-majority: false
-  minimum-cluster-size: 2
+  prefix-length: 24
+  vip-management-enabled: true
+  command-timeout-seconds: 3
 
 cluster:
   name: ha-dhcp
   port: 5701
-  members: []
+  members:
+    - 192.168.56.101:5701
+    - 192.168.56.102:5701

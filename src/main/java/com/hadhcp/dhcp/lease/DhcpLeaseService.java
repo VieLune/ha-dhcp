@@ -11,8 +11,12 @@ import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.time.Clock;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -162,6 +166,68 @@ public class DhcpLeaseService {
                 saveMirror(expired);
             }
         }
+    }
+
+    @Scheduled(fixedDelayString = "${dhcp.recovery-sync-ms:2000}")
+    @Transactional
+    public void syncRecoveredLeases() {
+        if (store.memberCount() < 2) {
+            return;
+        }
+
+        if (haService.hasVip()) {
+            mergeAsVipHolder();
+        } else {
+            replaceLocalMirrorFromAuthority();
+        }
+    }
+
+    private void mergeAsVipHolder() {
+        Map<String, DhcpLeaseRecord> finalByIp = new LinkedHashMap<>();
+        Set<String> usedMacs = new HashSet<>();
+
+        for (DhcpLeaseEntity entity : repository.findAll().stream()
+                .sorted(Comparator.comparing(DhcpLeaseEntity::getIpAddress))
+                .toList()) {
+            DhcpLeaseRecord local = mapper.toRecord(entity);
+            finalByIp.put(local.ipAddress(), local);
+            usedMacs.add(local.macAddress().toLowerCase());
+        }
+
+        for (DhcpLeaseRecord remote : sortedStoreValues()) {
+            if (finalByIp.containsKey(remote.ipAddress())) {
+                continue;
+            }
+            if (usedMacs.contains(remote.macAddress().toLowerCase())) {
+                continue;
+            }
+            finalByIp.put(remote.ipAddress(), remote);
+            usedMacs.add(remote.macAddress().toLowerCase());
+            saveMirror(remote);
+        }
+
+        store.replaceAll(finalByIp.values());
+    }
+
+    private void replaceLocalMirrorFromAuthority() {
+        Map<String, DhcpLeaseRecord> finalByIp = new LinkedHashMap<>();
+        Set<String> usedMacs = new HashSet<>();
+        for (DhcpLeaseRecord remote : sortedStoreValues()) {
+            if (finalByIp.containsKey(remote.ipAddress()) || usedMacs.contains(remote.macAddress().toLowerCase())) {
+                continue;
+            }
+            finalByIp.put(remote.ipAddress(), remote);
+            usedMacs.add(remote.macAddress().toLowerCase());
+        }
+
+        repository.deleteAllInBatch();
+        finalByIp.values().forEach(record -> repository.save(mapper.toEntity(record)));
+    }
+
+    private List<DhcpLeaseRecord> sortedStoreValues() {
+        List<DhcpLeaseRecord> values = new ArrayList<>(store.values());
+        values.sort(Comparator.comparing(DhcpLeaseRecord::ipAddress));
+        return values;
     }
 
     private Optional<DhcpLeaseRecord> findReusableLeaseByMac(String mac, Instant now) {

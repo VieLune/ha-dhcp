@@ -12,27 +12,26 @@ class HaServiceTest {
     void canServeDhcpOnlyWhenMasterVipAuthorityAndMirrorAreReady() {
         DhcpProperties dhcpProperties = new DhcpProperties();
         HaProperties haProperties = new HaProperties();
+        haProperties.setIp("127.0.0.1");
         FakeAuthority authority = new FakeAuthority();
         FakeVipInspector vipInspector = new FakeVipInspector();
-        HaService service = new HaService(dhcpProperties, haProperties, authority, vipInspector);
+        VipAddressResolver vipAddressResolver = new VipAddressResolver(haProperties, dhcpProperties);
+        HaService service = new HaService(dhcpProperties, authority, vipInspector, vipAddressResolver);
 
         assertThat(service.canServeDhcp()).isFalse();
 
-        service.updateRole(HaRole.MASTER);
         service.markLeaseMirrorLoaded();
+        service.markConfigLoaded();
 
         assertThat(service.canServeDhcp()).isTrue();
-
-        service.updateRole(HaRole.BACKUP);
-        assertThat(service.canServeDhcp()).isFalse();
-
-        service.updateRole(HaRole.MASTER);
+        assertThat(service.role()).isEqualTo(HaRole.MASTER);
         authority.available = false;
-        assertThat(service.canServeDhcp()).isFalse();
+        assertThat(service.canServeDhcp()).isTrue();
 
         authority.available = true;
         vipInspector.hasVip = false;
         assertThat(service.canServeDhcp()).isFalse();
+        assertThat(service.role()).isEqualTo(HaRole.BACKUP);
     }
 
     private static class FakeAuthority implements LeaseAuthorityHealth {

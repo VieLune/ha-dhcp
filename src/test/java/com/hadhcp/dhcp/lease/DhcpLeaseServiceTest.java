@@ -99,6 +99,12 @@ class DhcpLeaseServiceTest {
         }
 
         @Override
+        public void replaceAll(Collection<DhcpLeaseRecord> records) {
+            leases.clear();
+            records.forEach(record -> leases.put(record.ipAddress(), record));
+        }
+
+        @Override
         public Collection<DhcpLeaseRecord> values() {
             return leases.values();
         }

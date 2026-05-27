@@ -1,23 +1,23 @@
 package com.hadhcp.dhcp.lease;
 
-import com.hadhcp.config.HaProperties;
 import com.hazelcast.core.HazelcastInstance;
 import com.hazelcast.core.LifecycleService;
 import com.hazelcast.map.IMap;
 import java.util.Collection;
+import java.util.Map;
 import java.util.Optional;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 import org.springframework.stereotype.Component;
 
 @Component
 public class HazelcastDhcpLeaseStore implements DhcpLeaseStore {
 
     private final HazelcastInstance hazelcastInstance;
-    private final HaProperties haProperties;
     private final IMap<String, DhcpLeaseRecord> leases;
 
-    public HazelcastDhcpLeaseStore(HazelcastInstance hazelcastInstance, HaProperties haProperties) {
+    public HazelcastDhcpLeaseStore(HazelcastInstance hazelcastInstance) {
         this.hazelcastInstance = hazelcastInstance;
-        this.haProperties = haProperties;
         this.leases = hazelcastInstance.getMap("dhcp:leases");
     }
 
@@ -44,6 +44,14 @@ public class HazelcastDhcpLeaseStore implements DhcpLeaseStore {
     }
 
     @Override
+    public void replaceAll(Collection<DhcpLeaseRecord> records) {
+        Map<String, DhcpLeaseRecord> next = records.stream()
+                .collect(Collectors.toMap(DhcpLeaseRecord::ipAddress, Function.identity(), (left, right) -> left));
+        leases.clear();
+        leases.putAll(next);
+    }
+
+    @Override
     public Collection<DhcpLeaseRecord> values() {
         return leases.values();
     }
@@ -54,7 +62,7 @@ public class HazelcastDhcpLeaseStore implements DhcpLeaseStore {
         if (!lifecycleService.isRunning()) {
             return false;
         }
-        return !haProperties.isRequireMajority() || memberCount() >= haProperties.getMinimumClusterSize();
+        return true;
     }
 
     @Override

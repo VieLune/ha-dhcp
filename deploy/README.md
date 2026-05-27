@@ -1,10 +1,10 @@
-# AC 双机 HA 最小部署文件说明
+# AC 双机 HA 部署辅助文件说明
 
-本目录提供用于 HA 验证的最小 OpenResty/Nginx、Keepalived 和抓包辅助文件。
+本目录保留 Ubuntu 环境下的 OpenResty/Nginx、Keepalived 和抓包辅助文件。当前正式方案不再依赖 Keepalived；VIP 由应用在 Ubuntu 上通过 `ip` 和 `arping` 控制。
 
-这些文件不修改业务代码，只用于搭建正常双机主备验证环境，并辅助证明 DHCP、广播、多播在 HA 下是否存在问题。
+Keepalived 文件仅作为历史验证、迁移对比或问题复现材料，不作为正式运行依赖。
 
-## 1. 文件清单
+## 文件清单
 
 ```text
 deploy/
@@ -24,9 +24,16 @@ deploy/
     capture_multicast.sh
 ```
 
-## 2. 使用前必须替换的参数
+## 正式方案关注点
 
-按现场环境替换以下占位值：
+- 两台 AC 均运行 Spring Boot、DHCP、Hazelcast 和本地 H2。
+- `ha.ip` 配置后作为 VIP；未配置时应用默认解析 Ubuntu 第一块物理网卡 IPv4。
+- 运行时主备只看本机是否实际持有 VIP。
+- Hazelcast 同步 `dhcp:leases`、`edge:devices`、`ac:config`。
+- H2 保存 `dhcp_lease`、`edge_device`、`ac_config`。
+- 网络分区期间允许双主，恢复后按 VIP 持有侧优先合并。
+
+## 需要替换的占位参数
 
 | 占位值 | 含义 | 示例 |
 |---|---|---|
@@ -35,105 +42,35 @@ deploy/
 | `TODO_AC2_IP` | AC-2 物理 IP | `192.168.1.11` |
 | `TODO_VIP_CIDR` | VIP 与掩码 | `192.168.1.100/24` |
 | `TODO_APP_PORT` | Spring Boot 端口 | `8080` |
-| `TODO_HTTP_PORT` | OpenResty 对外端口 | `80` |
+| `TODO_HTTP_PORT` | OpenResty/Nginx 对外端口 | `80` |
 
-## 3. 推荐复制路径
-
-OpenResty：
-
-```bash
-cp deploy/openresty/nginx.conf /usr/local/openresty/nginx/conf/nginx.conf
-```
-
-如果现场使用系统 Nginx，也可以复制到：
-
-```bash
-cp deploy/openresty/nginx.conf /etc/nginx/nginx.conf
-```
-
-Keepalived：
-
-```bash
-cp deploy/keepalived/keepalived-ac1.conf /etc/keepalived/keepalived.conf
-cp deploy/keepalived/check_app.sh /etc/keepalived/check_app.sh
-cp deploy/keepalived/notify.sh /etc/keepalived/notify.sh
-chmod +x /etc/keepalived/check_app.sh /etc/keepalived/notify.sh
-```
-
-AC-2 使用 `keepalived-ac2.conf`。
-
-辅助脚本授权：
-
-```bash
-chmod +x deploy/openresty/*.sh
-chmod +x deploy/validation/*.sh
-```
-
-## 4. 启动前检查
-
-OpenResty/Nginx：
+## OpenResty/Nginx 验证
 
 ```bash
 openresty -t
 systemctl restart openresty
+curl -i http://<VIP>:TODO_HTTP_PORT/
 ```
 
-如果使用 Nginx：
+如果现场使用系统 Nginx：
 
 ```bash
 nginx -t
 systemctl restart nginx
 ```
 
-Keepalived：
+## 抓包辅助
 
 ```bash
-keepalived -t -f /etc/keepalived/keepalived.conf
-systemctl restart keepalived
-```
-
-## 5. 验证命令
-
-查看 VIP 是否在本机：
-
-```bash
-ip addr show dev TODO_INTERFACE
-```
-
-访问 VIP：
-
-```bash
-curl -i http://<VIP>:TODO_HTTP_PORT/
-curl -i http://<VIP>:TODO_HTTP_PORT/nginx-health
-```
-
-查看 Keepalived 日志：
-
-```bash
-journalctl -u keepalived -f
-```
-
-抓 DHCP：
-
-```bash
+chmod +x deploy/validation/*.sh
 deploy/validation/capture_dhcp.sh TODO_INTERFACE
-```
-
-抓广播：
-
-```bash
 deploy/validation/capture_broadcast.sh TODO_INTERFACE
-```
-
-抓多播：
-
-```bash
 deploy/validation/capture_multicast.sh TODO_INTERFACE
 ```
 
-## 6. 注意事项
+## 注意事项
 
 - AC-1 物理 IP、AC-2 物理 IP、VIP、验证 PC IP 必须从 DHCP 地址池排除。
-- 第一版验证重点是证明问题，不要求业务代码具备 HA 角色感知。
-- 当前 `notify.sh` 默认只记录角色变化。如果后续 Spring Boot 增加 HA 角色接口，再配置 `HA_NOTIFY_URL` 调用业务接口。
-- `check_app.sh` 默认优先检查 `/actuator/health/ha`，如果不存在，会回退检查 `/actuator/health`。
+- 生产环境建议显式配置 `ha.ip` 和 `ha.interface-name`。
+- 当前 `deploy/keepalived/*` 仅用于历史验证，不要写入正式部署步骤。
+- 正式部署文档以主线 `doc/01-05` 的两节点 AP 优先方案为准。

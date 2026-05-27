@@ -1,7 +1,5 @@
 package com.hadhcp.config;
 
-import jakarta.validation.constraints.Min;
-import jakarta.validation.constraints.NotBlank;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.validation.annotation.Validated;
 
@@ -9,19 +7,18 @@ import org.springframework.validation.annotation.Validated;
 @ConfigurationProperties(prefix = "ha")
 public class HaProperties {
 
-    @NotBlank
-    private String vip = "127.0.0.1";
+    private String ip;
     private String interfaceName;
-    private boolean requireMajority = false;
-    @Min(1)
-    private int minimumClusterSize = 2;
+    private int prefixLength = 24;
+    private boolean vipManagementEnabled = true;
+    private long commandTimeoutSeconds = 3;
 
-    public String getVip() {
-        return vip;
+    public String getIp() {
+        return ip;
     }
 
-    public void setVip(String vip) {
-        this.vip = vip;
+    public void setIp(String ip) {
+        this.ip = ip;
     }
 
     public String getInterfaceName() {
@@ -32,19 +29,37 @@ public class HaProperties {
         this.interfaceName = interfaceName;
     }
 
-    public boolean isRequireMajority() {
-        return requireMajority;
+    public int getPrefixLength() {
+        return prefixLength;
     }
 
-    public void setRequireMajority(boolean requireMajority) {
-        this.requireMajority = requireMajority;
+    public void setPrefixLength(int prefixLength) {
+        this.prefixLength = prefixLength;
     }
 
-    public int getMinimumClusterSize() {
-        return minimumClusterSize;
+    public boolean isVipManagementEnabled() {
+        return vipManagementEnabled;
     }
 
-    public void setMinimumClusterSize(int minimumClusterSize) {
-        this.minimumClusterSize = minimumClusterSize;
+    public void setVipManagementEnabled(boolean vipManagementEnabled) {
+        this.vipManagementEnabled = vipManagementEnabled;
+    }
+
+    public long getCommandTimeoutSeconds() {
+        return commandTimeoutSeconds;
+    }
+
+    public void setCommandTimeoutSeconds(long commandTimeoutSeconds) {
+        this.commandTimeoutSeconds = commandTimeoutSeconds;
+    }
+
+    @Deprecated
+    public String getVip() {
+        return ip;
+    }
+
+    @Deprecated
+    public void setVip(String vip) {
+        this.ip = vip;
     }
 }

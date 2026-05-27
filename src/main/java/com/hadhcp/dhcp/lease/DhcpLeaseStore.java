@@ -14,5 +14,7 @@ public interface DhcpLeaseStore extends LeaseAuthorityHealth {
 
     void put(DhcpLeaseRecord lease);
 
+    void replaceAll(Collection<DhcpLeaseRecord> records);
+
     Collection<DhcpLeaseRecord> values();
 }
